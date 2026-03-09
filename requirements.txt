@@ -1,0 +1,10 @@
+streamlit
+requests
+pandas
+numpy
+python-dotenv
+google-generativeai
+polyline
+folium
+streamlit-folium
+streamlit-calendar
