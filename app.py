@@ -20,7 +20,7 @@ GEMINI_KEY = st.secrets.get("GOOGLE_API_KEY") or os.getenv("GOOGLE_API_KEY")
 # Determina URL di reindirizzamento
 if "streamlit.app" in st.get_option("browser.serverAddress") or "share.streamlit.io" in st.get_option("browser.serverAddress"):
     # Sostituisci con il tuo URL reale dopo il primo deploy
-    REDIRECT_URI = "https://elite-ai-coach.streamlit.app" 
+    REDIRECT_URI = "https://acbest2-dot-elite-ai-coach.streamlit.app"
 else:
     REDIRECT_URI = 'http://localhost:8501'
 
