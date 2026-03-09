@@ -1,21 +1,28 @@
-import streamlit as st
+mport streamlit as st
 import requests
 import pandas as pd
-import numpy as np
 import os
 import google.generativeai as genai
-from dotenv import load_dotenv
-import polyline
-import folium
-from streamlit_folium import st_folium
-from datetime import datetime, timedelta
 
-# --- 1. CONFIGURAZIONE CHIAVI (Locali o Cloud) ---
-load_dotenv()
-# Se sei su Streamlit Cloud, userà st.secrets, altrimenti os.getenv
-CLIENT_ID = st.secrets.get("STRAVA_CLIENT_ID") or os.getenv("STRAVA_CLIENT_ID")
-CLIENT_SECRET = st.secrets.get("STRAVA_CLIENT_SECRET") or os.getenv("STRAVA_CLIENT_SECRET")
-GEMINI_KEY = st.secrets.get("GOOGLE_API_KEY") or os.getenv("GOOGLE_API_KEY")
+# --- 1. CARICAMENTO SICURO DELLE CHIAVI ---
+# Proviamo a prenderle dai Secrets di Streamlit Cloud
+try:
+    CLIENT_ID = st.secrets["STRAVA_CLIENT_ID"]
+    CLIENT_SECRET = st.secrets["STRAVA_CLIENT_SECRET"]
+    GEMINI_KEY = st.secrets["GOOGLE_API_KEY"]
+except:
+    # Se fallisce (magari sei in locale), prova con os.getenv
+    CLIENT_ID = os.getenv("STRAVA_CLIENT_ID")
+    CLIENT_SECRET = os.getenv("STRAVA_CLIENT_SECRET")
+    GEMINI_KEY = os.getenv("GOOGLE_API_KEY")
+
+# URL FISSO PER EVITARE ERRORI LOCALHOST
+REDIRECT_URI = "https://elite-ai-coach-4lm2ecs6qfslfkkzaeacrd.streamlit.app/"
+
+# Controllo di sicurezza: se mancano le chiavi, avvisa l'utente invece di crashare
+if not CLIENT_ID or not CLIENT_SECRET:
+    st.error("⚠️ Errore: Chiavi Strava mancanti nei Secrets di Streamlit!")
+    st.stop()
 
 # Determina URL di reindirizzamento
 if "streamlit.app" in st.get_option("browser.serverAddress") or "share.streamlit.io" in st.get_option("browser.serverAddress"):
