@@ -236,6 +236,263 @@ def compute_fitness(df):
     return ctl_mapped, atl_mapped, tsb_mapped, ctl, atl, tsb, daily
 
 # ============================================================
+# 6b. METRICHE AVANZATE — TIER 1 + TIER 3
+# ============================================================
+
+def calc_trimp(row, u):
+    """
+    TRIMP (Training Impulse) — Banister 1991.
+    Formula: durata(min) × ΔHR × 0.64×e^(1.92×ΔHR_ratio)
+    dove ΔHR = (HR_media - HR_riposo) / (HR_max - HR_riposo)
+    """
+    hr    = row.get("average_heartrate")
+    dur   = row["moving_time"] / 60
+    fc_r  = u["fc_min"]
+    fc_m  = u["fc_max"]
+    if pd.notna(hr) and fc_m > fc_r and hr > fc_r:
+        delta_hr = (hr - fc_r) / (fc_m - fc_r)
+        delta_hr = max(0.0, min(delta_hr, 1.0))
+        return dur * delta_hr * 0.64 * np.exp(1.92 * delta_hr)
+    return dur * 0.3  # fallback conservativo
+
+def calc_acwr(df_sorted):
+    """
+    ACWR = TSS_7gg / TSS_28gg_media_rolling
+    Restituisce il valore corrente (ultimo).
+    Safe zone: 0.8–1.3. Danger zone: >1.5
+    """
+    daily = df_sorted.groupby(df_sorted["start_date"].dt.date)["tss"].sum()
+    daily.index = pd.to_datetime(daily.index)
+    full_range = pd.date_range(daily.index.min(), daily.index.max(), freq="D")
+    daily = daily.reindex(full_range, fill_value=0)
+
+    atl_7  = daily.rolling(7,  min_periods=1).mean()
+    ctl_28 = daily.rolling(28, min_periods=1).mean()
+    acwr   = atl_7 / ctl_28.replace(0, np.nan)
+    return float(acwr.iloc[-1]) if not acwr.empty else 0.0, acwr
+
+def calc_ramp_rate(ctl_daily):
+    """
+    Ramp Rate = variazione CTL negli ultimi 7 giorni.
+    Ideale: +3/+7 per settimana. >+8 = rischio infortuni.
+    """
+    if len(ctl_daily) < 8:
+        return 0.0
+    return float(ctl_daily.iloc[-1] - ctl_daily.iloc[-8])
+
+def calc_monotony(df_sorted, days=7):
+    """
+    Monotonia = media_TSS / std_TSS (ultimi N giorni).
+    <1.5 = ottimo. 1.5–2 = attenzione. >2 = rischio overtraining.
+    """
+    daily = df_sorted.groupby(df_sorted["start_date"].dt.date)["tss"].sum()
+    daily.index = pd.to_datetime(daily.index)
+    full_range = pd.date_range(daily.index.min(), daily.index.max(), freq="D")
+    daily = daily.reindex(full_range, fill_value=0)
+    recent = daily.tail(days)
+    std = recent.std()
+    return float(recent.mean() / std) if std > 0 else 0.0
+
+def calc_training_strain(df_sorted, days=7):
+    """
+    Training Strain = Monotonia × TSS_totale_7gg.
+    Indice di stress cumulativo (Banister). >2000 = zona critica.
+    """
+    daily = df_sorted.groupby(df_sorted["start_date"].dt.date)["tss"].sum()
+    daily.index = pd.to_datetime(daily.index)
+    full_range = pd.date_range(daily.index.min(), daily.index.max(), freq="D")
+    daily = daily.reindex(full_range, fill_value=0)
+    recent = daily.tail(days)
+    mono = calc_monotony(df_sorted, days)
+    return float(recent.sum() * mono)
+
+def calc_ef_series(df_sorted):
+    """
+    Efficiency Factor per attività aerobiche.
+    EF = velocità_m_s / FC_media  (running) oppure watt / FC_media (bici).
+    Trend crescente = miglioramento aerobico.
+    """
+    ef_list = []
+    for _, row in df_sorted.iterrows():
+        hr = row.get("average_heartrate")
+        if not pd.notna(hr) or hr == 0:
+            ef_list.append(np.nan)
+            continue
+        if row["type"] in ("Ride", "VirtualRide", "MountainBikeRide"):
+            w = row.get("average_watts")
+            ef_list.append(float(w) / float(hr) if pd.notna(w) and w > 0 else np.nan)
+        else:
+            dist = row["distance"]
+            t    = row["moving_time"]
+            speed_ms = dist / t if t > 0 else 0
+            ef_list.append(speed_ms / hr if hr > 0 else np.nan)
+    return ef_list
+
+def calc_vo2max_estimate(df_sorted):
+    """
+    Stima VO2max con formula di Jack Daniels (VDOT approach) sulle ultime corse.
+    VO2max ≈ (-4.60 + 0.182258*(dist_m/time_min) + 0.000104*(dist_m/time_min)^2) /
+              (0.8 + 0.1894393*e^(-0.012778*time_min) + 0.2989558*e^(-0.1932605*time_min))
+    Usa le attività Run con distanza ≥ 5 km e FC media disponibile.
+    """
+    runs = df_sorted[
+        (df_sorted["type"].isin(["Run", "TrailRun"])) &
+        (df_sorted["distance"] >= 5000)
+    ].copy()
+    if runs.empty:
+        return None, None
+
+    best_vo2 = 0
+    best_row = None
+    for _, row in runs.iterrows():
+        dist_m   = row["distance"]
+        time_min = row["moving_time"] / 60
+        if time_min <= 0:
+            continue
+        vel = dist_m / time_min  # m/min
+        pct_vo2 = 0.8 + 0.1894393 * np.exp(-0.012778 * time_min) + \
+                  0.2989558 * np.exp(-0.1932605 * time_min)
+        vo2  = (-4.60 + 0.182258 * vel + 0.000104 * vel**2)
+        vo2max = vo2 / pct_vo2 if pct_vo2 > 0 else 0
+        if vo2max > best_vo2:
+            best_vo2 = vo2max
+            best_row = row
+    return round(best_vo2, 1) if best_vo2 > 0 else None, best_row
+
+def predict_race_times(vo2max):
+    """
+    Stima tempi di gara da VO2max usando le tabelle VDOT di Daniels.
+    Formula inversa approssimata per ogni distanza.
+    """
+    if not vo2max or vo2max <= 0:
+        return {}
+    # Formula approssimata: pace_min_km = a + b/vo2max
+    races = {
+        "5 km":     {"dist": 5.0,    "a": 1.60, "b": 220},
+        "10 km":    {"dist": 10.0,   "a": 1.65, "b": 280},
+        "Mezza":    {"dist": 21.097, "a": 1.70, "b": 310},
+        "Maratona": {"dist": 42.195, "a": 1.80, "b": 380},
+    }
+    results = {}
+    for label, p in races.items():
+        pace_sec_km = (p["a"] + p["b"] / vo2max) * 60
+        total_sec   = pace_sec_km * p["dist"]
+        h = int(total_sec // 3600)
+        m = int((total_sec % 3600) // 60)
+        s = int(total_sec % 60)
+        time_str  = f"{h}h {m:02d}m {s:02d}s" if h > 0 else f"{m}:{s:02d}"
+        pace_str  = f"{int(pace_sec_km // 60)}:{int(pace_sec_km % 60):02d} /km"
+        results[label] = {"time": time_str, "pace": pace_str}
+    return results
+
+def calc_variability_index(row):
+    """
+    Variability Index = NP / AP (Normalized Power / Average Power).
+    Disponibile solo per bici con watt.
+    <1.05 = costante; >1.15 = variabile/nervoso.
+    """
+    np_val  = row.get("normalized_power")
+    ap_val  = row.get("average_watts")
+    if pd.notna(np_val) and pd.notna(ap_val) and ap_val > 0:
+        return round(float(np_val) / float(ap_val), 3)
+    return None
+
+# ============================================================
+# 6c. DIZIONARIO TOOLTIP METRICHE
+# ============================================================
+METRIC_INFO = {
+    "TSS": {
+        "nome": "Training Stress Score",
+        "desc": "Misura lo stress fisiologico di una singola sessione integrando durata e intensità. Sviluppato da Andrew Coggan.",
+        "range": "0–50: recupero facile | 50–100: medio | 100–150: difficile | >150: molto duro (giorni di recupero necessari)",
+        "fonte": "Coggan & Allen — Training and Racing with a Power Meter",
+    },
+    "CTL": {
+        "nome": "Chronic Training Load (Fitness)",
+        "desc": "Media esponenziale a 42 giorni del TSS giornaliero. Rappresenta il tuo livello di fitness cronico e capacità di lavoro.",
+        "range": "<40: principiante/recupero | 40–60: buona base | 60–80: atleta allenato | 80–100: atleta avanzato | >100: elite",
+        "fonte": "Modello PMC (Performance Management Chart) — Banister 1991",
+    },
+    "ATL": {
+        "nome": "Acute Training Load (Fatica)",
+        "desc": "Media esponenziale a 7 giorni del TSS. Rappresenta la fatica accumulata nell'ultima settimana. Valore alto = sei stanco.",
+        "range": "Confronta con CTL: ATL > CTL = accumulo fatica. La differenza determina il TSB.",
+        "fonte": "Modello PMC — Banister 1991",
+    },
+    "TSB": {
+        "nome": "Training Stress Balance (Forma)",
+        "desc": "TSB = CTL - ATL. Indica il bilanciamento tra fitness e fatica. Positivo = riposato. Negativo = affaticato.",
+        "range": "> +25: detrain/troppo riposo | +10/+25: fresco per gara | -10/+10: zona ottimale allenamento | -20/-10: accumulo | < -20: rischio overtraining",
+        "fonte": "Coggan — TrainingPeaks Performance Management",
+    },
+    "TRIMP": {
+        "nome": "Training Impulse",
+        "desc": "Metrica di carico allenamento basata su FC, durata e intensità relativa. Precede il TSS ed è indipendente da potenza o GPS.",
+        "range": "Dipende dalla durata. 100 TRIMP ≈ sessione di 1h a Z3. Usa il trend storico come riferimento personale.",
+        "fonte": "Banister et al. — A systems model of training, physical performance and retention (1975)",
+    },
+    "ACWR": {
+        "nome": "Acute:Chronic Workload Ratio",
+        "desc": "Rapporto tra carico degli ultimi 7 giorni e media degli ultimi 28. Indicatore di rischio infortuni (studi su atleti elite).",
+        "range": "< 0.8: undertraining | 0.8–1.3: zona sicura ✅ | 1.3–1.5: attenzione ⚠️ | > 1.5: danger zone 🔴 rischio infortuni elevato",
+        "fonte": "Gabbett TJ — British Journal of Sports Medicine 2016 | Malone et al. IJSPP 2017",
+    },
+    "RAMP_RATE": {
+        "nome": "Ramp Rate (CTL settimanale)",
+        "desc": "Variazione del CTL negli ultimi 7 giorni. Indica quanto velocemente sta crescendo il tuo fitness.",
+        "range": "< 3: crescita lenta/riposo | 3–7: progressione ideale ✅ | > 8: rischio overtraining ⚠️ | > 10: pericolo 🔴",
+        "fonte": "TrainingPeaks — Performance Management Chart guidelines",
+    },
+    "MONOTONIA": {
+        "nome": "Monotonia dell'Allenamento",
+        "desc": "Media TSS / Deviazione standard TSS degli ultimi 7 giorni. Misura quanto è vario il tuo allenamento. Troppa uniformità = rischio.",
+        "range": "< 1.5: variazione sana ✅ | 1.5–2.0: attenzione ⚠️ | > 2.0: rischio overtraining anche con carichi moderati 🔴",
+        "fonte": "Foster C. — Journal of Strength and Conditioning Research 1998",
+    },
+    "STRAIN": {
+        "nome": "Training Strain",
+        "desc": "Monotonia × TSS_totale_settimanale. Indice di stress cumulativo che combina volume e uniformità dell'allenamento.",
+        "range": "< 1000: basso | 1000–2000: moderato | > 2000: elevato/critico 🔴",
+        "fonte": "Foster C. — JSCR 1998 | Banister training model",
+    },
+    "EF": {
+        "nome": "Efficiency Factor (Indice di Efficienza Aerobica)",
+        "desc": "Velocità (m/s) diviso FC media (corsa) oppure Watt / FC (bici). Trend crescente = migliori adattamenti aerobici.",
+        "range": "Corsa: EF ~0.010–0.017 m/s per bpm. Bici: EF ~1.5–2.5 W/bpm. Il valore assoluto dipende dall'atleta — conta il miglioramento nel tempo.",
+        "fonte": "Joe Friel — Training Bible | Coggan normalized metrics",
+    },
+    "VO2MAX": {
+        "nome": "VO2max Stimato",
+        "desc": "Massimo consumo di ossigeno, indicatore fondamentale del fitness cardiovascolare. Stimato da pace e durata delle tue corse migliori (formula Daniels/VDOT).",
+        "range": "< 35: sedentario | 35–45: nella media | 45–55: buono | 55–65: molto buono | > 65: atleta d'élite",
+        "fonte": "Daniels J. — Daniels' Running Formula (VDOT tables) | Nes et al. 2011",
+    },
+    "VI": {
+        "nome": "Variability Index (solo bici con potenza)",
+        "desc": "Normalized Power / Average Power. Misura quanto è stato uniforme lo sforzo. Valore basso = corsa costante ed efficiente.",
+        "range": "1.00–1.05: costante/pianura ✅ | 1.05–1.10: leggermente variabile | 1.10–1.15: misto | > 1.15: molto variabile/nervoso",
+        "fonte": "Coggan & Allen — Training and Racing with a Power Meter",
+    },
+    "POL": {
+        "nome": "Distribuzione Polarizzata",
+        "desc": "% del tempo trascorso in bassa intensità (Z1-Z2). La ricerca mostra che gli atleti endurance d'élite trascorrono ~80% in Z1-Z2 e ~20% in Z4-Z5.",
+        "range": "< 60%: troppo sforzo a media intensità (zona grigia) | 60–75%: accettabile | > 75%: distribuzione polarizzata ottimale ✅",
+        "fonte": "Seiler S. — International Journal of Sports Physiology and Performance 2010",
+    },
+}
+
+def metric_tooltip(key):
+    """Renderizza un expander piccolo con le info sulla metrica."""
+    info = METRIC_INFO.get(key)
+    if not info:
+        return
+    with st.expander(f"ℹ️ Cos'è?", expanded=False):
+        st.markdown(f"**{info['nome']}**")
+        st.markdown(info["desc"])
+        st.markdown(f"📊 **Range tipici:** {info['range']}")
+        st.markdown(f"📚 *Fonte: {info['fonte']}*")
+
+# ============================================================
 # 7. MAPPA
 # ============================================================
 def draw_map(encoded_polyline, height=300):
@@ -349,6 +606,17 @@ if token_ok:
     current_ctl = df["ctl"].iloc[-1]
     current_atl = df["atl"].iloc[-1]
     current_tsb = df["tsb"].iloc[-1]
+
+    # ---- METRICHE AVANZATE ----
+    df["trimp"]      = df.apply(lambda row: calc_trimp(row, u), axis=1)
+    acwr_val, acwr_series = calc_acwr(df)
+    ramp_rate        = calc_ramp_rate(ctl_daily)
+    monotonia        = calc_monotony(df)
+    strain_val       = calc_training_strain(df)
+    df["ef"]         = calc_ef_series(df)
+    vo2max_val, _    = calc_vo2max_estimate(df)
+    race_preds       = predict_race_times(vo2max_val)
+    df["vi"]         = df.apply(calc_variability_index, axis=1)
 
     # Zone per ogni attività
     df["zone_num"]   = df.apply(lambda r: get_zone_for_activity(r, u["fc_max"])[0], axis=1)
@@ -536,80 +804,190 @@ if token_ok:
     elif menu == "💪 Stato Fisico":
         st.markdown("## 💪 Analisi Stato Fisico Attuale")
 
-        # KPI principali
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("CTL — Fitness",  f"{current_ctl:.1f}", help="42 giorni. >60 = buon livello")
-        c2.metric("ATL — Fatica",   f"{current_atl:.1f}", help="7 giorni. Alto = stanco")
-        c3.metric("TSB — Forma",    f"{current_tsb:.1f}", help="-10/+10 = zona ottimale")
-        # Monotonia: std / media TSS ultimi 7gg
-        tss7 = df["tss"].tail(7)
-        monotonia = tss7.mean() / tss7.std() if tss7.std() > 0 else 0
-        c4.metric("Monotonia", f"{monotonia:.2f}", help="<2 = variazione sana. >2 = troppa routine")
-
-        # Stato forma card
+        # ── Stato forma banner ──
         st.markdown(f"""
         <div style="background:linear-gradient(135deg,{status_color}22,{status_color}08);
-                    border:1px solid {status_color}55; border-radius:16px; padding:20px; margin:16px 0;">
-            <div style="font-size:28px; font-weight:800; color:{status_color}">{status_label}</div>
-            <div style="color:#ccc; margin-top:8px; font-size:15px">
-                TSB = {current_tsb:.1f} &nbsp;|&nbsp; CTL = {current_ctl:.1f} &nbsp;|&nbsp; ATL = {current_atl:.1f}
+                    border:1px solid {status_color}55; border-radius:16px;
+                    padding:18px 24px; margin-bottom:20px; display:flex; align-items:center; gap:16px">
+            <div style="font-size:36px">{status_label.split()[0]}</div>
+            <div>
+                <div style="font-size:22px; font-weight:800; color:{status_color}">{' '.join(status_label.split()[1:])}</div>
+                <div style="color:#aaa; font-size:14px; margin-top:2px">
+                    CTL {current_ctl:.1f} &nbsp;·&nbsp; ATL {current_atl:.1f} &nbsp;·&nbsp; TSB {current_tsb:.1f}
+                </div>
             </div>
         </div>
         """, unsafe_allow_html=True)
 
+        # ── BLOCCO 1: Metriche PMC classiche ──
+        st.markdown("### 📊 Metriche PMC — Performance Management Chart")
+        r1c1, r1c2, r1c3, r1c4 = st.columns(4)
+
+        with r1c1:
+            st.metric("CTL — Fitness", f"{current_ctl:.1f}")
+            metric_tooltip("CTL")
+        with r1c2:
+            st.metric("ATL — Fatica", f"{current_atl:.1f}")
+            metric_tooltip("ATL")
+        with r1c3:
+            st.metric("TSB — Forma", f"{current_tsb:.1f}")
+            metric_tooltip("TSB")
+        with r1c4:
+            trimp_7 = df["trimp"].tail(7).sum()
+            st.metric("TRIMP (7gg)", f"{trimp_7:.0f}")
+            metric_tooltip("TRIMP")
+
         st.divider()
 
-        # Grafici CTL/ATL/TSB + TSS giornaliero
-        col_left, col_right = st.columns([2, 1])
+        # ── BLOCCO 2: Metriche carico avanzate ──
+        st.markdown("### ⚡ Carico & Rischio Infortuni")
+        r2c1, r2c2, r2c3, r2c4 = st.columns(4)
 
-        with col_left:
-            st.markdown("#### Andamento 90 giorni")
-            chart_df = pd.DataFrame({
-                "CTL": ctl_daily, "ATL": atl_daily, "TSB": tsb_daily
-            }).dropna().tail(90)
+        # Colori ACWR
+        if acwr_val < 0.8:    acwr_color, acwr_emoji = "#2196F3", "🔵"
+        elif acwr_val <= 1.3: acwr_color, acwr_emoji = "#4CAF50", "🟢"
+        elif acwr_val <= 1.5: acwr_color, acwr_emoji = "#FF9800", "🟡"
+        else:                  acwr_color, acwr_emoji = "#F44336", "🔴"
 
-            fig = make_subplots(rows=2, cols=1, shared_xaxes=True,
-                                row_heights=[0.65, 0.35], vertical_spacing=0.05)
-            fig.add_trace(go.Scatter(x=chart_df.index, y=chart_df["CTL"],
-                                      name="CTL", line=dict(color="#2196F3", width=2.5),
-                                      fill="tozeroy", fillcolor="rgba(33,150,243,0.07)"), row=1, col=1)
-            fig.add_trace(go.Scatter(x=chart_df.index, y=chart_df["ATL"],
-                                      name="ATL", line=dict(color="#FF9800", width=2)), row=1, col=1)
-            fig.add_trace(go.Scatter(x=chart_df.index, y=chart_df["TSB"],
-                                      name="TSB", line=dict(color="#4CAF50", width=2, dash="dot")), row=1, col=1)
-            fig.add_hrect(y0=-10, y1=10, fillcolor="rgba(76,175,80,0.06)", line_width=0, row=1, col=1)
+        # Colori Ramp Rate
+        if abs(ramp_rate) <= 3:   rr_color = "#2196F3"
+        elif abs(ramp_rate) <= 7: rr_color = "#4CAF50"
+        elif abs(ramp_rate) <= 10: rr_color = "#FF9800"
+        else:                      rr_color = "#F44336"
 
-            tss_bar = tss_daily.tail(90)
-            colors  = ["#e94560" if v > 80 else "#FF9800" if v > 50 else "#4CAF50" for v in tss_bar.values]
-            fig.add_trace(go.Bar(x=tss_bar.index, y=tss_bar.values,
-                                  name="TSS/giorno", marker_color=colors, opacity=0.8), row=2, col=1)
-            fig.update_layout(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-                               height=400, margin=dict(l=0, r=0, t=10, b=0),
-                               legend=dict(orientation="h", y=1.05),
-                               xaxis2=dict(gridcolor="rgba(255,255,255,0.05)"),
-                               yaxis=dict(gridcolor="rgba(255,255,255,0.05)"),
-                               yaxis2=dict(gridcolor="rgba(255,255,255,0.05)"))
-            st.plotly_chart(fig, use_container_width=True)
+        # Colori Monotonia
+        if monotonia < 1.5:   mono_color = "#4CAF50"
+        elif monotonia < 2.0: mono_color = "#FF9800"
+        else:                  mono_color = "#F44336"
 
-        with col_right:
-            st.markdown("#### Zone FC — ultimi 30gg")
+        # Colori Strain
+        if strain_val < 1000:   strain_color = "#4CAF50"
+        elif strain_val < 2000: strain_color = "#FF9800"
+        else:                    strain_color = "#F44336"
+
+        with r2c1:
+            st.markdown(f"<div style='font-size:13px;color:#888'>ACWR</div>"
+                        f"<div style='font-size:28px;font-weight:800;color:{acwr_color}'>{acwr_emoji} {acwr_val:.2f}</div>",
+                        unsafe_allow_html=True)
+            metric_tooltip("ACWR")
+        with r2c2:
+            arrow = "↑" if ramp_rate > 0 else "↓"
+            st.markdown(f"<div style='font-size:13px;color:#888'>Ramp Rate (7gg)</div>"
+                        f"<div style='font-size:28px;font-weight:800;color:{rr_color}'>{arrow} {ramp_rate:+.1f} CTL</div>",
+                        unsafe_allow_html=True)
+            metric_tooltip("RAMP_RATE")
+        with r2c3:
+            st.markdown(f"<div style='font-size:13px;color:#888'>Monotonia</div>"
+                        f"<div style='font-size:28px;font-weight:800;color:{mono_color}'>{monotonia:.2f}</div>",
+                        unsafe_allow_html=True)
+            metric_tooltip("MONOTONIA")
+        with r2c4:
+            st.markdown(f"<div style='font-size:13px;color:#888'>Training Strain</div>"
+                        f"<div style='font-size:28px;font-weight:800;color:{strain_color}'>{strain_val:.0f}</div>",
+                        unsafe_allow_html=True)
+            metric_tooltip("STRAIN")
+
+        # Gauge ACWR
+        fig_gauge = go.Figure(go.Indicator(
+            mode="gauge+number",
+            value=acwr_val,
+            title={"text": "ACWR — Rischio Infortuni", "font": {"size": 14}},
+            gauge={
+                "axis": {"range": [0, 2.0], "tickwidth": 1},
+                "bar":  {"color": acwr_color, "thickness": 0.25},
+                "steps": [
+                    {"range": [0,   0.8], "color": "rgba(33,150,243,0.15)"},
+                    {"range": [0.8, 1.3], "color": "rgba(76,175,80,0.15)"},
+                    {"range": [1.3, 1.5], "color": "rgba(255,152,0,0.15)"},
+                    {"range": [1.5, 2.0], "color": "rgba(244,67,54,0.15)"},
+                ],
+                "threshold": {"line": {"color": "#fff", "width": 2}, "thickness": 0.75, "value": acwr_val},
+            },
+            number={"font": {"size": 32}, "suffix": ""},
+        ))
+        fig_gauge.update_layout(paper_bgcolor="rgba(0,0,0,0)", height=220,
+                                 margin=dict(l=20, r=20, t=40, b=10),
+                                 font={"color": "#ccc"})
+
+        g_col, acwr_hist_col = st.columns([1, 2])
+        with g_col:
+            st.plotly_chart(fig_gauge, use_container_width=True)
+        with acwr_hist_col:
+            acwr_plot = acwr_series.tail(90).dropna()
+            fig_acwr = go.Figure()
+            fig_acwr.add_hrect(y0=0.8, y1=1.3, fillcolor="rgba(76,175,80,0.08)", line_width=0)
+            fig_acwr.add_hrect(y0=1.3, y1=1.5, fillcolor="rgba(255,152,0,0.08)", line_width=0)
+            fig_acwr.add_hrect(y0=1.5, y1=3.0, fillcolor="rgba(244,67,54,0.08)", line_width=0)
+            fig_acwr.add_trace(go.Scatter(x=acwr_plot.index, y=acwr_plot.values,
+                                           line=dict(color=acwr_color, width=2),
+                                           fill="tozeroy", fillcolor=f"{acwr_color}15",
+                                           name="ACWR"))
+            fig_acwr.add_hline(y=0.8, line_dash="dot", line_color="#4CAF5088", line_width=1)
+            fig_acwr.add_hline(y=1.3, line_dash="dot", line_color="#FF980088", line_width=1)
+            fig_acwr.add_hline(y=1.5, line_dash="dot", line_color="#F4433688", line_width=1)
+            fig_acwr.update_layout(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                                    height=220, margin=dict(l=0, r=0, t=10, b=0),
+                                    showlegend=False,
+                                    xaxis=dict(gridcolor="rgba(255,255,255,0.05)"),
+                                    yaxis=dict(gridcolor="rgba(255,255,255,0.05)", range=[0, max(2.0, acwr_plot.max()+0.2)]))
+            st.markdown("<div style='font-size:13px;color:#888;margin-top:8px'>Storico ACWR — 90 giorni</div>", unsafe_allow_html=True)
+            st.plotly_chart(fig_acwr, use_container_width=True)
+
+        st.divider()
+
+        # ── BLOCCO 3: CTL/ATL/TSB + TSS giornaliero ──
+        st.markdown("### 📈 Andamento PMC — 90 giorni")
+        chart_df = pd.DataFrame({
+            "CTL": ctl_daily, "ATL": atl_daily, "TSB": tsb_daily
+        }).dropna().tail(90)
+
+        fig_pmc = make_subplots(rows=2, cols=1, shared_xaxes=True,
+                            row_heights=[0.65, 0.35], vertical_spacing=0.04,
+                            subplot_titles=["CTL / ATL / TSB", "TSS giornaliero"])
+        fig_pmc.add_trace(go.Scatter(x=chart_df.index, y=chart_df["CTL"],
+                                  name="CTL", line=dict(color="#2196F3", width=2.5),
+                                  fill="tozeroy", fillcolor="rgba(33,150,243,0.07)"), row=1, col=1)
+        fig_pmc.add_trace(go.Scatter(x=chart_df.index, y=chart_df["ATL"],
+                                  name="ATL", line=dict(color="#FF9800", width=2)), row=1, col=1)
+        fig_pmc.add_trace(go.Scatter(x=chart_df.index, y=chart_df["TSB"],
+                                  name="TSB", line=dict(color="#4CAF50", width=2, dash="dot")), row=1, col=1)
+        fig_pmc.add_hrect(y0=-10, y1=10, fillcolor="rgba(76,175,80,0.05)", line_width=0, row=1, col=1)
+        tss_bar = tss_daily.tail(90)
+        bar_colors = ["#e94560" if v > 80 else "#FF9800" if v > 50 else "#4CAF50" for v in tss_bar.values]
+        fig_pmc.add_trace(go.Bar(x=tss_bar.index, y=tss_bar.values,
+                              name="TSS/giorno", marker_color=bar_colors, opacity=0.85), row=2, col=1)
+        fig_pmc.update_layout(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                           height=420, margin=dict(l=0, r=0, t=30, b=0),
+                           legend=dict(orientation="h", y=1.04),
+                           xaxis2=dict(gridcolor="rgba(255,255,255,0.05)"),
+                           yaxis=dict(gridcolor="rgba(255,255,255,0.05)"),
+                           yaxis2=dict(gridcolor="rgba(255,255,255,0.05)"))
+        st.plotly_chart(fig_pmc, use_container_width=True)
+
+        st.divider()
+
+        # ── BLOCCO 4: Zone FC + Volume + EF ──
+        st.markdown("### ❤️ Intensità, Volume & Efficienza Aerobica")
+        col_z, col_vol, col_ef = st.columns(3)
+
+        with col_z:
+            st.markdown("**Zone FC — ultimi 30gg**")
+            metric_tooltip("POL")
             df30 = df[df["start_date"] >= (df["start_date"].max() - timedelta(days=30))]
             df30 = df30[df30["zone_num"] > 0]
+            z12, z45, pol = 0, 0, 0
             if not df30.empty:
                 zone_counts = df30.groupby(["zone_num", "zone_label", "zone_color"]).apply(
                     lambda x: x["moving_time"].sum() / 3600
                 ).reset_index(name="ore")
                 zone_counts = zone_counts.sort_values("zone_num")
                 fig_z = go.Figure(go.Bar(
-                    x=zone_counts["ore"],
-                    y=zone_counts["zone_label"],
-                    orientation="h",
-                    marker_color=zone_counts["zone_color"],
-                    text=[f"{v:.1f}h" for v in zone_counts["ore"]],
-                    textposition="outside",
+                    x=zone_counts["ore"], y=zone_counts["zone_label"],
+                    orientation="h", marker_color=zone_counts["zone_color"],
+                    text=[f"{v:.1f}h" for v in zone_counts["ore"]], textposition="outside",
                 ))
                 fig_z.update_layout(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-                                     height=220, margin=dict(l=0, r=60, t=0, b=0),
+                                     height=200, margin=dict(l=0, r=60, t=0, b=0),
                                      xaxis=dict(gridcolor="rgba(255,255,255,0.05)"),
                                      showlegend=False)
                 st.plotly_chart(fig_z, use_container_width=True)
@@ -617,86 +995,215 @@ if token_ok:
                 z12 = zone_counts[zone_counts["zone_num"] <= 2]["ore"].sum()
                 z45 = zone_counts[zone_counts["zone_num"] >= 4]["ore"].sum()
                 pol = z12 / total_z * 100 if total_z > 0 else 0
-                st.metric("Allenamento bassa intensità", f"{pol:.0f}%",
-                           help="Ideale >75% (allenamento polarizzato)")
+                pol_color = "#4CAF50" if pol >= 75 else "#FF9800" if pol >= 60 else "#F44336"
+                st.markdown(f"<span style='color:{pol_color};font-weight:700'>Bassa intensità: {pol:.0f}%</span> (target >75%)", unsafe_allow_html=True)
             else:
-                st.info("Dati FC non disponibili")
+                st.info("Nessun dato FC disponibile")
 
-            st.markdown("#### Trend Volume (km/settimana)")
+        with col_vol:
+            st.markdown("**Volume settimanale (km)**")
             df_weekly = df.copy()
             df_weekly["week"] = df_weekly["start_date"].dt.to_period("W").dt.start_time
             weekly_km = df_weekly.groupby("week")["distance"].sum() / 1000
             weekly_km = weekly_km.tail(12)
-            fig_w = go.Figure(go.Bar(
-                x=weekly_km.index, y=weekly_km.values,
-                marker_color="#2196F3", opacity=0.8,
-            ))
+            avg_vol = weekly_km.mean()
+            w_colors = ["#e94560" if v > avg_vol * 1.3 else "#2196F3" for v in weekly_km.values]
+            fig_w = go.Figure(go.Bar(x=weekly_km.index, y=weekly_km.values,
+                                      marker_color=w_colors, opacity=0.85))
+            fig_w.add_hline(y=avg_vol, line_dash="dot", line_color="#ffffff44", line_width=1,
+                             annotation_text=f"media {avg_vol:.0f}km", annotation_font_color="#aaa")
             fig_w.update_layout(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-                                  height=180, margin=dict(l=0, r=0, t=0, b=0),
+                                  height=200, margin=dict(l=0, r=0, t=0, b=0),
                                   xaxis=dict(gridcolor="rgba(255,255,255,0.05)", tickformat="%d/%m"),
                                   yaxis=dict(gridcolor="rgba(255,255,255,0.05)"))
             st.plotly_chart(fig_w, use_container_width=True)
 
+        with col_ef:
+            st.markdown("**Efficiency Factor — trend**")
+            metric_tooltip("EF")
+            ef_data = df[df["ef"].notna()][["start_date", "ef", "type"]].tail(30)
+            if not ef_data.empty:
+                fig_ef = go.Figure()
+                for sport_type in ef_data["type"].unique():
+                    sub = ef_data[ef_data["type"] == sport_type]
+                    fig_ef.add_trace(go.Scatter(
+                        x=sub["start_date"], y=sub["ef"],
+                        mode="markers+lines",
+                        name=f"{get_sport_info(sport_type)['icon']} {get_sport_info(sport_type)['label']}",
+                        line=dict(color=get_sport_info(sport_type)["color"], width=1.5),
+                        marker=dict(size=6),
+                    ))
+                fig_ef.update_layout(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                                      height=200, margin=dict(l=0, r=0, t=0, b=0),
+                                      legend=dict(font=dict(size=10), orientation="h", y=1.15),
+                                      xaxis=dict(gridcolor="rgba(255,255,255,0.05)"),
+                                      yaxis=dict(gridcolor="rgba(255,255,255,0.05)"))
+                st.plotly_chart(fig_ef, use_container_width=True)
+                ef_trend = ef_data["ef"].iloc[-1] - ef_data["ef"].iloc[0] if len(ef_data) > 1 else 0
+                ef_emoji = "📈" if ef_trend > 0 else "📉"
+                st.markdown(f"{ef_emoji} Trend EF: **{ef_trend:+.4f}** negli ultimi {len(ef_data)} allenamenti")
+            else:
+                st.info("Dati FC non sufficienti per EF")
+
         st.divider()
 
-        # --- AI Analisi stato fisico + Piano 7 giorni ---
+        # ── BLOCCO 5: VO2max + Race Predictor + VI ──
+        st.markdown("### 🔬 Capacità Aerobica & Performance")
+        col_vo2, col_race, col_vi = st.columns(3)
+
+        with col_vo2:
+            st.markdown("**VO2max Stimato**")
+            metric_tooltip("VO2MAX")
+            if vo2max_val:
+                # Colore in base al range
+                if vo2max_val >= 65:   vo2_color, vo2_label = "#9C27B0", "🏆 Élite"
+                elif vo2max_val >= 55: vo2_color, vo2_label = "#4CAF50", "🥇 Molto Buono"
+                elif vo2max_val >= 45: vo2_color, vo2_label = "#2196F3", "🥈 Buono"
+                elif vo2max_val >= 35: vo2_color, vo2_label = "#FF9800", "🥉 Nella Media"
+                else:                   vo2_color, vo2_label = "#F44336", "📈 Da Migliorare"
+                st.markdown(f"""
+                <div style="background:{vo2_color}15; border:1px solid {vo2_color}44;
+                             border-radius:12px; padding:16px; text-align:center;">
+                    <div style="font-size:42px; font-weight:900; color:{vo2_color}">{vo2max_val}</div>
+                    <div style="color:#aaa; font-size:12px">ml/kg/min</div>
+                    <div style="color:{vo2_color}; font-size:14px; font-weight:700; margin-top:4px">{vo2_label}</div>
+                </div>
+                """, unsafe_allow_html=True)
+                # Mini gauge VO2max
+                fig_vo2 = go.Figure(go.Indicator(
+                    mode="gauge+number",
+                    value=vo2max_val,
+                    gauge={
+                        "axis": {"range": [20, 85]},
+                        "bar":  {"color": vo2_color, "thickness": 0.3},
+                        "steps": [
+                            {"range": [20, 35], "color": "rgba(244,67,54,0.15)"},
+                            {"range": [35, 45], "color": "rgba(255,152,0,0.15)"},
+                            {"range": [45, 55], "color": "rgba(33,150,243,0.15)"},
+                            {"range": [55, 65], "color": "rgba(76,175,80,0.15)"},
+                            {"range": [65, 85], "color": "rgba(156,39,176,0.15)"},
+                        ],
+                    },
+                    number={"font": {"size": 0}},
+                ))
+                fig_vo2.update_layout(paper_bgcolor="rgba(0,0,0,0)", height=120,
+                                       margin=dict(l=10, r=10, t=10, b=0),
+                                       font={"color": "#ccc"})
+                st.plotly_chart(fig_vo2, use_container_width=True)
+            else:
+                st.info("Servono almeno 1 corsa ≥5km con dati tempo per stimare il VO2max.")
+
+        with col_race:
+            st.markdown("**🏁 Race Time Predictor**")
+            if race_preds:
+                for dist_label, pred in race_preds.items():
+                    st.markdown(f"""
+                    <div style="display:flex; justify-content:space-between; align-items:center;
+                                 background:rgba(255,255,255,0.03); border-radius:8px;
+                                 padding:8px 12px; margin-bottom:6px;">
+                        <span style="color:#aaa; font-size:14px">🏃 {dist_label}</span>
+                        <span style="color:#e94560; font-weight:700; font-size:15px">{pred['time']}</span>
+                        <span style="color:#666; font-size:12px">{pred['pace']}</span>
+                    </div>
+                    """, unsafe_allow_html=True)
+                st.caption("⚠️ Stime basate su VO2max stimato (formula Daniels VDOT). Usa come riferimento indicativo.")
+            else:
+                st.info("Calcola il VO2max per ottenere le stime.")
+
+        with col_vi:
+            st.markdown("**Variability Index (bici)**")
+            metric_tooltip("VI")
+            vi_data = df[df["vi"].notna()][["start_date", "vi", "name"]].tail(20)
+            if not vi_data.empty:
+                vi_colors = ["#4CAF50" if v <= 1.05 else "#FF9800" if v <= 1.10 else "#F44336"
+                              for v in vi_data["vi"]]
+                fig_vi = go.Figure(go.Bar(
+                    x=vi_data["start_date"], y=vi_data["vi"],
+                    marker_color=vi_colors, opacity=0.85,
+                    text=[f"{v:.3f}" for v in vi_data["vi"]], textposition="outside",
+                ))
+                fig_vi.add_hline(y=1.05, line_dash="dot", line_color="#4CAF5055")
+                fig_vi.add_hline(y=1.10, line_dash="dot", line_color="#FF980055")
+                fig_vi.update_layout(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                                      height=200, margin=dict(l=0, r=0, t=20, b=0),
+                                      xaxis=dict(gridcolor="rgba(255,255,255,0.05)", tickformat="%d/%m"),
+                                      yaxis=dict(gridcolor="rgba(255,255,255,0.05)", range=[0.95, max(1.25, vi_data["vi"].max()+0.05)]))
+                st.plotly_chart(fig_vi, use_container_width=True)
+                avg_vi = vi_data["vi"].mean()
+                vi_label = "Costante ✅" if avg_vi <= 1.05 else "Variabile ⚠️" if avg_vi <= 1.10 else "Molto variabile 🔴"
+                st.markdown(f"Media VI: **{avg_vi:.3f}** — {vi_label}")
+            else:
+                st.info("Nessuna attività in bici con dati di potenza normalizzata.")
+
+        st.divider()
+
+        # ── BLOCCO 6: AI Analisi completa + Piano 7gg ──
+        st.markdown("### 🤖 Coaching AI Avanzato")
         col_ai1, col_ai2 = st.columns(2)
 
         with col_ai1:
-            st.markdown("#### 🤖 Analisi Stato Fisico")
-            with st.spinner("Analisi in corso..."):
-                try:
-                    # Trend CTL ultimi 30gg
-                    ctl_30ago = ctl_daily.iloc[-30] if len(ctl_daily) >= 30 else ctl_daily.iloc[0]
-                    trend = "crescente" if current_ctl > ctl_30ago else "decrescente"
-                    df_sport = df.tail(20)["type"].value_counts().to_dict()
-
-                    ctx_fitness = (
-                        f"CTL (fitness): {current_ctl:.1f} (trend {trend} rispetto a 30gg fa: {ctl_30ago:.1f}). "
-                        f"ATL (fatica acuta): {current_atl:.1f}. TSB (forma): {current_tsb:.1f}. "
-                        f"Monotonia allenamento: {monotonia:.2f}. "
-                        f"Sport più praticati (ultimi 20): {df_sport}. "
-                        f"Ore in Z1-Z2 ultimi 30gg: {z12 if 'z12' in dir() else 'N/A'}h. "
-                        f"% allenamento bassa intensità: {pol:.0f}% {'N/A' if 'pol' not in dir() else ''}."
-                    )
-                    prompt_fitness = (
-                        "Sei un coach sportivo con competenze in fisiologia dell'esercizio. "
-                        "Analizza in dettaglio lo stato fisico dell'atleta: "
-                        "interpreta CTL/ATL/TSB, commenta la distribuzione delle intensità, "
-                        "identifica se c'è rischio di overtraining o undertraining, "
-                        "e descrivi il trend di allenamento degli ultimi 30 giorni. "
-                        "Sii preciso e usa termini tecnici. Max 4 paragrafi."
-                    )
-                    result_fit = genai.GenerativeModel(sel_model).generate_content(
-                        f"{ctx_fitness}\n\n{prompt_fitness}"
-                    ).text
-                    st.info(result_fit)
-                except Exception as e:
-                    st.error(f"Errore AI: {e}")
+            st.markdown("#### Analisi Fisiolologica Completa")
+            if st.button("🔍 Genera Analisi", key="btn_analisi", use_container_width=True):
+                with st.spinner("Analisi in corso..."):
+                    try:
+                        ctl_30ago = ctl_daily.iloc[-30] if len(ctl_daily) >= 30 else ctl_daily.iloc[0]
+                        trend_ctl = "crescente" if current_ctl > ctl_30ago else "decrescente"
+                        df_sport  = df.tail(20)["type"].value_counts().to_dict()
+                        ctx_fitness = (
+                            f"DATI ATLETA: CTL={current_ctl:.1f} (trend {trend_ctl}), "
+                            f"ATL={current_atl:.1f}, TSB={current_tsb:.1f}. "
+                            f"ACWR={acwr_val:.2f}, Ramp Rate={ramp_rate:+.1f}/settimana. "
+                            f"Monotonia={monotonia:.2f}, Training Strain={strain_val:.0f}. "
+                            f"VO2max stimato={vo2max_val if vo2max_val else 'N/D'} ml/kg/min. "
+                            f"% allenamento bassa intensità (Z1-Z2)={pol:.0f}%. "
+                            f"TRIMP ultimi 7gg={trimp_7:.0f}. "
+                            f"Sport praticati={df_sport}."
+                        )
+                        prompt_fitness = (
+                            "Sei un fisiolo dello sport e coach d'élite. "
+                            "Fornisci un'analisi DETTAGLIATA e PROFESSIONALE dello stato fisico di questo atleta. "
+                            "Struttura la risposta così: "
+                            "1) Stato di forma attuale (interpreta CTL/ATL/TSB/ACWR), "
+                            "2) Rischio overtraining/undertraining (monotonia, strain, ramp rate), "
+                            "3) Qualità dell'allenamento (distribuzione intensità, EF), "
+                            "4) Capacità aerobica (VO2max, implicazioni), "
+                            "5) Raccomandazioni concrete per le prossime 2 settimane. "
+                            "Usa terminologia tecnica. Sii diretto e specifico."
+                        )
+                        result_fit = genai.GenerativeModel(sel_model).generate_content(
+                            f"{ctx_fitness}\n\n{prompt_fitness}"
+                        ).text
+                        st.session_state["analisi_fisica"] = result_fit
+                    except Exception as e:
+                        st.error(f"Errore AI: {e}")
+            if "analisi_fisica" in st.session_state:
+                st.info(st.session_state["analisi_fisica"])
 
         with col_ai2:
-            st.markdown("#### 🗓️ Piano Allenamento AI — Prossimi 7 giorni")
-
+            st.markdown("#### 🗓️ Piano Allenamento — Prossimi 7 giorni")
             goal = st.selectbox("Obiettivo:", [
-                "Mantenimento forma", "Aumentare il fitness (CTL)", "Recupero / scarico",
-                "Preparazione gara (entro 2 settimane)", "Base aerobica"
+                "Mantenimento forma", "Aumentare il fitness (CTL)",
+                "Recupero / scarico", "Preparazione gara (entro 2 settimane)", "Base aerobica"
             ], key="goal_select")
-
-            if st.button("🔄 Genera Piano", use_container_width=True):
+            if st.button("🔄 Genera Piano", use_container_width=True, key="btn_piano"):
                 with st.spinner("Il coach sta pianificando..."):
                     try:
                         ctx_plan = (
-                            f"CTL: {current_ctl:.1f}, ATL: {current_atl:.1f}, TSB: {current_tsb:.1f}. "
-                            f"FC max atleta: {u['fc_max']}, FTP: {u['ftp']}W. "
-                            f"Sport principale: {df['type'].value_counts().index[0] if not df.empty else 'Running'}. "
-                            f"Obiettivo atleta: {goal}."
+                            f"CTL={current_ctl:.1f}, ATL={current_atl:.1f}, TSB={current_tsb:.1f}. "
+                            f"ACWR={acwr_val:.2f}, Ramp Rate={ramp_rate:+.1f}. "
+                            f"Monotonia={monotonia:.2f}, Strain={strain_val:.0f}. "
+                            f"FC max={u['fc_max']}, FTP={u['ftp']}W. "
+                            f"Sport principale: {df['type'].value_counts().index[0]}. "
+                            f"% bassa intensità attuale: {pol:.0f}%. "
+                            f"Obiettivo: {goal}."
                         )
                         prompt_plan = (
-                            "Crea un piano di allenamento per i prossimi 7 giorni. "
-                            "Per ogni giorno indica: tipo di sessione, durata, intensità (zona FC o % FTP), "
-                            "obiettivo fisiologico. Se è un giorno di riposo, indica il perché. "
-                            "Formatta come lista numerata, un giorno per riga, con tutti i dettagli pratici. "
-                            "Considera lo stato di forma attuale per calibrare il carico."
+                            "Crea un piano di allenamento dettagliato per i prossimi 7 giorni. "
+                            "Per ogni giorno: tipo sessione, durata precisa, intensità (zona FC o %FTP), "
+                            "obiettivo fisiologico, note pratiche. "
+                            "Calibra il carico considerando ACWR e TSB attuali. "
+                            "Se ACWR > 1.3 riduci il volume. Se TSB < -20 inserisci più recupero. "
+                            "Formato: Giorno N — [tipo]: descrizione dettagliata."
                         )
                         result_plan = genai.GenerativeModel(sel_model).generate_content(
                             f"{ctx_plan}\n\n{prompt_plan}"
@@ -704,7 +1211,6 @@ if token_ok:
                         st.session_state["piano_7gg"] = result_plan
                     except Exception as e:
                         st.error(f"Errore AI: {e}")
-
             if "piano_7gg" in st.session_state:
                 st.success(st.session_state["piano_7gg"])
 
