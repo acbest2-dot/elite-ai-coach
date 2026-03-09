@@ -530,15 +530,39 @@ def refresh_token_if_needed():
     return False
 
 # ============================================================
-# 9. FETCH
+# 9. FETCH — Paginazione completa (tutte le attività)
 # ============================================================
-@st.cache_data(ttl=300)
-def fetch_activities(access_token: str):
-    r = requests.get(
-        "https://www.strava.com/api/v3/athlete/activities?per_page=100",
-        headers={"Authorization": f"Bearer {access_token}"},
-    )
-    return r.json() if r.status_code == 200 else []
+@st.cache_data(ttl=1800, show_spinner=False)   # cache 30 min — storico cambia poco
+def fetch_all_activities(access_token: str) -> list:
+    """
+    Scarica TUTTE le attività con paginazione.
+    Strava restituisce max 200 per pagina.
+    Si ferma quando arriva una pagina vuota.
+    """
+    all_acts = []
+    page     = 1
+    headers  = {"Authorization": f"Bearer {access_token}"}
+    while True:
+        r = requests.get(
+            f"https://www.strava.com/api/v3/athlete/activities"
+            f"?per_page=200&page={page}",
+            headers=headers,
+        )
+        if r.status_code != 200:
+            break
+        batch = r.json()
+        if not batch:          # pagina vuota → abbiamo tutto
+            break
+        all_acts.extend(batch)
+        if len(batch) < 200:   # ultima pagina parziale
+            break
+        page += 1
+    return all_acts
+
+@st.cache_data(ttl=300, show_spinner=False)
+def fetch_activities(access_token: str) -> list:
+    """Manteniamo questo alias per compatibilità — chiama la versione paginata."""
+    return fetch_all_activities(access_token)
 
 @st.cache_data(ttl=300)
 def fetch_athlete(access_token: str):
@@ -579,8 +603,15 @@ token_ok = refresh_token_if_needed()
 
 if token_ok:
     access_token = st.session_state.strava_token_info["access_token"]
-    raw          = fetch_activities(access_token)
     athlete      = fetch_athlete(access_token)
+
+    # Primo caricamento: mostra indicatore di avanzamento
+    if "activities_loaded" not in st.session_state:
+        with st.spinner("⏳ Scaricamento storico completo da Strava (potrebbe richiedere 20-40 secondi al primo accesso)..."):
+            raw = fetch_all_activities(access_token)
+        st.session_state.activities_loaded = True
+    else:
+        raw = fetch_all_activities(access_token)
 
     if not raw:
         st.error("Impossibile recuperare le attività.")
@@ -645,6 +676,7 @@ if token_ok:
         menu = st.radio("", [
             "📊 Dashboard",
             "💪 Stato Fisico",
+            "📈 Recap",
             "📅 Calendario",
             "💬 Coach Chat",
             "🏅 Record Personali",
@@ -652,12 +684,31 @@ if token_ok:
         ], label_visibility="collapsed")
 
         st.divider()
+        # Modelli disponibili — lista curata con fallback all'auto-discovery
+        AVAILABLE_MODELS = [
+            "gemini-1.5-flash",
+            "gemini-1.5-flash-8b",
+            "gemini-1.5-pro",
+            "gemini-2.0-flash",
+            "gemini-2.0-flash-lite",
+        ]
         try:
-            models    = [m.name for m in genai.list_models()
-                         if "generateContent" in m.supported_generation_methods]
-            sel_model = st.selectbox("🧠 Modello AI:", models, index=0)
+            discovered = [m.name for m in genai.list_models()
+                          if "generateContent" in m.supported_generation_methods
+                          and "gemini" in m.name]
+            # Unisci lista curata + scoperta, rimuovi duplicati mantenendo ordine
+            all_models = AVAILABLE_MODELS + [m for m in discovered if m not in AVAILABLE_MODELS]
         except Exception:
-            sel_model = "gemini-1.5-flash"
+            all_models = AVAILABLE_MODELS
+
+        # Prova a recuperare l'ultimo modello usato
+        default_idx = 0
+        if "sel_model" in st.session_state and st.session_state.sel_model in all_models:
+            default_idx = all_models.index(st.session_state.sel_model)
+
+        sel_model = st.selectbox("🧠 Modello AI:", all_models, index=default_idx,
+                                  help="gemini-1.5-flash/pro: stabile e senza limiti aggiuntivi. gemini-2.0: più recente ma con quote più basse.")
+        st.session_state.sel_model = sel_model
 
         st.divider()
         col_s1, col_s2, col_s3 = st.columns(3)
@@ -685,6 +736,87 @@ if token_ok:
         c3.metric("Fatica (ATL)",  f"{current_atl:.1f}", help="Acute Training Load – carico acuto 7gg")
         c4.metric("Attività Totali", len(df))
         c5.metric("Km Totali", f"{df['distance'].sum()/1000:.0f}")
+
+        st.divider()
+
+        # --- Recap ultimi 7 giorni ---
+        st.markdown("### 📅 Recap Ultimi 7 Giorni")
+        df7 = df[df["start_date"] >= (df["start_date"].max() - timedelta(days=7))]
+
+        r7c1, r7c2, r7c3, r7c4, r7c5, r7c6 = st.columns(6)
+        r7c1.metric("Sessioni",    len(df7))
+        r7c2.metric("Km totali",   f"{df7['distance'].sum()/1000:.1f}")
+        r7c3.metric("Ore totali",  f"{df7['moving_time'].sum()/3600:.1f}")
+        r7c4.metric("TSS totale",  f"{df7['tss'].sum():.0f}")
+        r7c5.metric("Dislivello",  f"{(df7['total_elevation_gain'].sum() or 0):.0f} m")
+        avg_hr_7 = df7["average_heartrate"].dropna()
+        r7c6.metric("FC media",    f"{avg_hr_7.mean():.0f} bpm" if not avg_hr_7.empty else "N/A")
+
+        # Barra sport della settimana
+        if not df7.empty:
+            sport_7 = df7["type"].value_counts()
+            sport_labels = [f"{get_sport_info(s)['icon']} {get_sport_info(s)['label']}" for s in sport_7.index]
+            fig_7d = go.Figure()
+            for i, (sp, cnt) in enumerate(sport_7.items()):
+                si = get_sport_info(sp)
+                df7_sp = df7[df7["type"] == sp]
+                km = df7_sp["distance"].sum() / 1000
+                tss_sp = df7_sp["tss"].sum()
+                fig_7d.add_trace(go.Bar(
+                    name=f"{si['icon']} {si['label']}",
+                    x=[f"{si['icon']} {si['label']}"],
+                    y=[df7_sp["moving_time"].sum() / 3600],
+                    marker_color=si["color"],
+                    text=[f"{km:.1f}km<br>TSS {tss_sp:.0f}"],
+                    textposition="inside",
+                    insidetextanchor="middle",
+                ))
+            fig_7d.update_layout(
+                paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                height=160, margin=dict(l=0, r=0, t=10, b=0),
+                showlegend=False, barmode="group",
+                xaxis=dict(gridcolor="rgba(255,255,255,0.05)"),
+                yaxis=dict(gridcolor="rgba(255,255,255,0.05)", title="ore"),
+            )
+            col_bar7, col_days7 = st.columns([2, 1])
+            with col_bar7:
+                st.plotly_chart(fig_7d, use_container_width=True)
+            with col_days7:
+                # Mini calendario settimanale
+                st.markdown("<div style='font-size:13px;color:#888;margin-bottom:6px'>Giorni attivi</div>", unsafe_allow_html=True)
+                today = datetime.now().date()
+                week_html = "<div style='display:flex;gap:6px;margin-top:4px'>"
+                giorni = ["L","M","M","G","V","S","D"]
+                for i in range(6, -1, -1):
+                    d = today - timedelta(days=i)
+                    active = not df7[df7["start_date"].dt.date == d].empty
+                    bg = "#4CAF50" if active else "rgba(255,255,255,0.07)"
+                    border = "#4CAF50" if active else "rgba(255,255,255,0.1)"
+                    week_html += (
+                        f"<div style='width:32px;height:32px;border-radius:8px;"
+                        f"background:{bg};border:1px solid {border};"
+                        f"display:flex;align-items:center;justify-content:center;"
+                        f"font-size:11px;color:{'#fff' if active else '#555'}'>"
+                        f"{giorni[d.weekday()]}</div>"
+                    )
+                week_html += "</div>"
+                st.markdown(week_html, unsafe_allow_html=True)
+
+                # Confronto con settimana precedente
+                df_prev7 = df[
+                    (df["start_date"] >= (df["start_date"].max() - timedelta(days=14))) &
+                    (df["start_date"] <  (df["start_date"].max() - timedelta(days=7)))
+                ]
+                delta_km  = df7["distance"].sum()/1000 - df_prev7["distance"].sum()/1000
+                delta_tss = df7["tss"].sum() - df_prev7["tss"].sum()
+                st.markdown(f"<div style='font-size:12px;color:#888;margin-top:10px'>vs settimana prec.</div>", unsafe_allow_html=True)
+                km_color  = "#4CAF50" if delta_km  >= 0 else "#F44336"
+                tss_color = "#4CAF50" if delta_tss >= 0 else "#F44336"
+                st.markdown(
+                    f"<span style='color:{km_color};font-size:13px'>{delta_km:+.1f} km</span> &nbsp; "
+                    f"<span style='color:{tss_color};font-size:13px'>{delta_tss:+.0f} TSS</span>",
+                    unsafe_allow_html=True
+                )
 
         st.divider()
 
@@ -820,6 +952,38 @@ if token_ok:
         """, unsafe_allow_html=True)
 
         # ── BLOCCO 1: Metriche PMC classiche ──
+        # ── Commento AI automatico ──
+        with st.spinner("🤖 Il coach sta valutando il tuo stato..."):
+            try:
+                ctl_30ago  = ctl_daily.iloc[-30] if len(ctl_daily) >= 30 else ctl_daily.iloc[0]
+                trend_ctl  = "in crescita" if current_ctl > ctl_30ago else "in calo"
+                df_sport_r = df.tail(14)["type"].value_counts().to_dict()
+                ctx_quick  = (
+                    f"CTL={current_ctl:.1f} ({trend_ctl} rispetto a 30gg fa: {ctl_30ago:.1f}), "
+                    f"ATL={current_atl:.1f}, TSB={current_tsb:.1f}, ACWR={acwr_val:.2f}, "
+                    f"Ramp Rate={ramp_rate:+.1f}, Monotonia={monotonia:.2f}, Strain={strain_val:.0f}. "
+                    f"VO2max stimato: {vo2max_val if vo2max_val else 'N/D'} ml/kg/min. "
+                    f"Sport ultimi 14gg: {df_sport_r}."
+                )
+                prompt_quick = (
+                    "Sei un coach sportivo d'élite. In 3-4 frasi dirette e concrete, "
+                    "dammi un giudizio immediato sullo stato fisico attuale di questo atleta: "
+                    "cosa sta andando bene, cosa richiede attenzione, e il consiglio più importante per questa settimana. "
+                    "Tono professionale ma diretto. No elenchi puntati, solo testo fluido."
+                )
+                quick_summary = genai.GenerativeModel(sel_model).generate_content(
+                    f"{ctx_quick}\n\n{prompt_quick}"
+                ).text
+                st.markdown(f"""
+                <div style="background:rgba(33,150,243,0.08); border-left:3px solid #2196F3;
+                             border-radius:0 12px 12px 0; padding:14px 18px; margin-bottom:16px;">
+                    <div style="font-size:12px;color:#2196F3;font-weight:700;margin-bottom:6px">🤖 VALUTAZIONE COACH</div>
+                    <div style="color:#ddd;font-size:14px;line-height:1.6">{quick_summary}</div>
+                </div>
+                """, unsafe_allow_html=True)
+            except Exception:
+                pass  # Se fallisce non blocchiamo la pagina
+
         st.markdown("### 📊 Metriche PMC — Performance Management Chart")
         r1c1, r1c2, r1c3, r1c4 = st.columns(4)
 
@@ -918,13 +1082,15 @@ if token_ok:
             fig_acwr.add_hrect(y0=0.8, y1=1.3, fillcolor="rgba(76,175,80,0.08)", line_width=0)
             fig_acwr.add_hrect(y0=1.3, y1=1.5, fillcolor="rgba(255,152,0,0.08)", line_width=0)
             fig_acwr.add_hrect(y0=1.5, y1=3.0, fillcolor="rgba(244,67,54,0.08)", line_width=0)
+            acwr_fill = {"#4CAF50": "rgba(76,175,80,0.12)", "#FF9800": "rgba(255,152,0,0.12)",
+                         "#F44336": "rgba(244,67,54,0.12)", "#2196F3": "rgba(33,150,243,0.12)"}.get(acwr_color, "rgba(150,150,150,0.12)")
             fig_acwr.add_trace(go.Scatter(x=acwr_plot.index, y=acwr_plot.values,
                                            line=dict(color=acwr_color, width=2),
-                                           fill="tozeroy", fillcolor=f"{acwr_color}15",
+                                           fill="tozeroy", fillcolor=acwr_fill,
                                            name="ACWR"))
-            fig_acwr.add_hline(y=0.8, line_dash="dot", line_color="#4CAF5088", line_width=1)
-            fig_acwr.add_hline(y=1.3, line_dash="dot", line_color="#FF980088", line_width=1)
-            fig_acwr.add_hline(y=1.5, line_dash="dot", line_color="#F4433688", line_width=1)
+            fig_acwr.add_hline(y=0.8, line_dash="dot", line_color="rgba(76,175,80,0.5)",  line_width=1)
+            fig_acwr.add_hline(y=1.3, line_dash="dot", line_color="rgba(255,152,0,0.5)",  line_width=1)
+            fig_acwr.add_hline(y=1.5, line_dash="dot", line_color="rgba(244,67,54,0.5)",  line_width=1)
             fig_acwr.update_layout(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
                                     height=220, margin=dict(l=0, r=0, t=10, b=0),
                                     showlegend=False,
@@ -1010,7 +1176,7 @@ if token_ok:
             w_colors = ["#e94560" if v > avg_vol * 1.3 else "#2196F3" for v in weekly_km.values]
             fig_w = go.Figure(go.Bar(x=weekly_km.index, y=weekly_km.values,
                                       marker_color=w_colors, opacity=0.85))
-            fig_w.add_hline(y=avg_vol, line_dash="dot", line_color="#ffffff44", line_width=1,
+            fig_w.add_hline(y=avg_vol, line_dash="dot", line_color="rgba(255,255,255,0.27)", line_width=1,
                              annotation_text=f"media {avg_vol:.0f}km", annotation_font_color="#aaa")
             fig_w.update_layout(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
                                   height=200, margin=dict(l=0, r=0, t=0, b=0),
@@ -1122,8 +1288,8 @@ if token_ok:
                     marker_color=vi_colors, opacity=0.85,
                     text=[f"{v:.3f}" for v in vi_data["vi"]], textposition="outside",
                 ))
-                fig_vi.add_hline(y=1.05, line_dash="dot", line_color="#4CAF5055")
-                fig_vi.add_hline(y=1.10, line_dash="dot", line_color="#FF980055")
+                fig_vi.add_hline(y=1.05, line_dash="dot", line_color="rgba(76,175,80,0.33)")
+                fig_vi.add_hline(y=1.10, line_dash="dot", line_color="rgba(255,152,0,0.33)")
                 fig_vi.update_layout(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
                                       height=200, margin=dict(l=0, r=0, t=20, b=0),
                                       xaxis=dict(gridcolor="rgba(255,255,255,0.05)", tickformat="%d/%m"),
@@ -1213,6 +1379,543 @@ if token_ok:
                         st.error(f"Errore AI: {e}")
             if "piano_7gg" in st.session_state:
                 st.success(st.session_state["piano_7gg"])
+
+    # ============================================================
+    # RECAP
+    # ============================================================
+    elif menu == "📈 Recap":
+        st.markdown("## 📈 Recap Allenamenti")
+
+        # ── Filtro sport ──
+        all_sports_recap = sorted(df["type"].unique().tolist())
+        st.markdown("**Filtra sport:**")
+        if "recap_sport_filter" not in st.session_state:
+            st.session_state.recap_sport_filter = set(all_sports_recap)
+
+        btn_cols_r = st.columns(min(len(all_sports_recap), 9))
+        for i, sport in enumerate(all_sports_recap):
+            si = get_sport_info(sport)
+            is_active = sport in st.session_state.recap_sport_filter
+            with btn_cols_r[i % len(btn_cols_r)]:
+                if st.button(
+                    f"{si['icon']} {si['label']}", key=f"recap_btn_{sport}",
+                    type="primary" if is_active else "secondary",
+                    use_container_width=True,
+                ):
+                    sf = st.session_state.recap_sport_filter
+                    sf.discard(sport) if sport in sf else sf.add(sport)
+                    st.rerun()
+
+        col_all_r, _ = st.columns([1, 8])
+        with col_all_r:
+            if st.button("✅ Tutti", key="recap_all", use_container_width=True):
+                st.session_state.recap_sport_filter = set(all_sports_recap)
+                st.rerun()
+
+        df_r = df[df["type"].isin(st.session_state.recap_sport_filter)].copy()
+
+        st.divider()
+
+        # ── Selezione periodo ──
+        tab_week, tab_month, tab_year, tab_yoy = st.tabs([
+            "📅 Settimana", "🗓️ Mese", "📆 Anno", "↔️ Anno su Anno"
+        ])
+
+        # ──────────────────────────────────────────────
+        # HELPER: genera KPI cards + grafici per un df
+        # ──────────────────────────────────────────────
+        def recap_kpi_row(df_sub, label_periodo):
+            """Mostra 6 KPI + delta vs periodo precedente."""
+            n_sess  = len(df_sub)
+            km      = df_sub["distance"].sum() / 1000
+            ore     = df_sub["moving_time"].sum() / 3600
+            tss_tot = df_sub["tss"].sum()
+            elev    = df_sub["total_elevation_gain"].sum() or 0
+            hr_vals = df_sub["average_heartrate"].dropna()
+            fc_med  = hr_vals.mean() if not hr_vals.empty else None
+            calorie = df_sub["kilojoules"].sum() or 0
+
+            c1, c2, c3, c4, c5, c6, c7 = st.columns(7)
+            c1.metric("Sessioni",   n_sess)
+            c2.metric("Km totali",  f"{km:.1f}")
+            c3.metric("Ore",        f"{ore:.1f}")
+            c4.metric("TSS",        f"{tss_tot:.0f}")
+            c5.metric("Dislivello", f"{elev:.0f} m")
+            c6.metric("FC media",   f"{fc_med:.0f} bpm" if fc_med else "N/A")
+            c7.metric("Calorie",    f"{calorie:.0f} kcal" if calorie else "N/A")
+
+        def sport_breakdown_chart(df_sub, height=200):
+            """Grafico a torta + barre per sport."""
+            if df_sub.empty:
+                st.info("Nessuna attività nel periodo selezionato.")
+                return
+            grp = df_sub.groupby("type").agg(
+                sessioni=("distance", "count"),
+                km=("distance", lambda x: x.sum()/1000),
+                ore=("moving_time", lambda x: x.sum()/3600),
+                tss=("tss", "sum"),
+            ).reset_index()
+            grp["label"] = grp["type"].apply(lambda x: f"{get_sport_info(x)['icon']} {get_sport_info(x)['label']}")
+            grp["color"] = grp["type"].apply(lambda x: get_sport_info(x)["color"])
+
+            col_pie, col_bar = st.columns(2)
+            with col_pie:
+                fig_p = go.Figure(go.Pie(
+                    labels=grp["label"], values=grp["ore"],
+                    marker_colors=grp["color"].tolist(),
+                    hole=0.5, textinfo="label+percent",
+                    textfont_size=12,
+                ))
+                fig_p.update_layout(paper_bgcolor="rgba(0,0,0,0)", height=height,
+                                     margin=dict(l=0,r=0,t=10,b=0), showlegend=False,
+                                     annotations=[dict(text="Ore", x=0.5, y=0.5,
+                                                        font_size=14, showarrow=False, font_color="#aaa")])
+                st.plotly_chart(fig_p, use_container_width=True)
+            with col_bar:
+                fig_b = go.Figure()
+                fig_b.add_trace(go.Bar(name="Km", x=grp["label"], y=grp["km"],
+                                        marker_color=grp["color"].tolist(), opacity=0.85,
+                                        text=grp["km"].round(1), textposition="outside"))
+                fig_b.update_layout(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                                     height=height, margin=dict(l=0,r=0,t=20,b=0),
+                                     xaxis=dict(gridcolor="rgba(255,255,255,0.05)"),
+                                     yaxis=dict(gridcolor="rgba(255,255,255,0.05)", title="km"),
+                                     showlegend=False)
+                st.plotly_chart(fig_b, use_container_width=True)
+
+        def weekly_bars_chart(df_sub, n_weeks=12, height=220):
+            """Barre volume settimanale con colori per sport."""
+            if df_sub.empty: return
+            df_w = df_sub.copy()
+            df_w["week"] = df_w["start_date"].dt.to_period("W").dt.start_time
+            sports_in_sub = df_w["type"].unique()
+            fig = go.Figure()
+            for sport in sports_in_sub:
+                si  = get_sport_info(sport)
+                sub = df_w[df_w["type"] == sport].groupby("week")["distance"].sum() / 1000
+                sub = sub.reindex(
+                    pd.date_range(df_w["week"].min(), df_w["week"].max(), freq="W-MON"),
+                    fill_value=0
+                ).tail(n_weeks)
+                fig.add_trace(go.Bar(
+                    name=f"{si['icon']} {si['label']}",
+                    x=sub.index, y=sub.values,
+                    marker_color=si["color"], opacity=0.85,
+                ))
+            fig.update_layout(
+                paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                barmode="stack", height=height, margin=dict(l=0,r=0,t=10,b=0),
+                legend=dict(orientation="h", y=1.1, font=dict(size=11)),
+                xaxis=dict(gridcolor="rgba(255,255,255,0.05)", tickformat="%d/%m"),
+                yaxis=dict(gridcolor="rgba(255,255,255,0.05)", title="km"),
+            )
+            st.plotly_chart(fig, use_container_width=True)
+
+        def activity_list_table(df_sub, n=10):
+            """Tabella top N attività per distanza."""
+            if df_sub.empty: return
+            top = df_sub.nlargest(n, "distance")[
+                ["start_date","type","name","distance","moving_time","total_elevation_gain","tss","average_heartrate"]
+            ].copy()
+            top["Sport"]      = top["type"].apply(lambda x: f"{get_sport_info(x)['icon']} {get_sport_info(x)['label']}")
+            top["Data"]       = top["start_date"].dt.strftime("%d/%m/%Y")
+            top["Km"]         = (top["distance"]/1000).round(2)
+            top["Durata"]     = top["moving_time"].apply(lambda x: f"{int(x//3600)}h {int((x%3600)//60):02d}m")
+            top["Dislivello"] = top["total_elevation_gain"].fillna(0).astype(int)
+            top["FC"]         = top["average_heartrate"].apply(lambda x: f"{x:.0f}" if pd.notna(x) else "N/A")
+            top["TSS"]        = top["tss"].round(1)
+            st.dataframe(
+                top[["Data","Sport","name","Km","Durata","Dislivello","FC","TSS"]].rename(columns={"name":"Nome"}),
+                use_container_width=True, hide_index=True,
+            )
+
+        # ────────────────────────────────────
+        # TAB 1 — SETTIMANA CORRENTE
+        # ────────────────────────────────────
+        with tab_week:
+            now = datetime.now()
+            # Lunedì della settimana corrente
+            week_start = now - timedelta(days=now.weekday())
+            week_start = week_start.replace(hour=0, minute=0, second=0, microsecond=0)
+            df_week = df_r[df_r["start_date"] >= week_start]
+
+            # Settimana precedente per delta
+            prev_week_start = week_start - timedelta(weeks=1)
+            df_prev_week    = df_r[(df_r["start_date"] >= prev_week_start) & (df_r["start_date"] < week_start)]
+
+            st.markdown(f"#### Settimana {week_start.strftime('%d %b')} — {now.strftime('%d %b %Y')}")
+
+            # KPI con delta
+            n1,n2,n3,n4,n5,n6 = st.columns(6)
+            def delta_str(curr, prev):
+                d = curr - prev
+                return f"{d:+.1f}" if abs(d) > 0.05 else None
+
+            n1.metric("Sessioni",   len(df_week),
+                      delta=str(len(df_week)-len(df_prev_week)) if len(df_prev_week) else None)
+            n2.metric("Km",         f"{df_week['distance'].sum()/1000:.1f}",
+                      delta=delta_str(df_week['distance'].sum()/1000, df_prev_week['distance'].sum()/1000))
+            n3.metric("Ore",        f"{df_week['moving_time'].sum()/3600:.1f}",
+                      delta=delta_str(df_week['moving_time'].sum()/3600, df_prev_week['moving_time'].sum()/3600))
+            n4.metric("TSS",        f"{df_week['tss'].sum():.0f}",
+                      delta=delta_str(df_week['tss'].sum(), df_prev_week['tss'].sum()))
+            n5.metric("Dislivello", f"{(df_week['total_elevation_gain'].sum() or 0):.0f} m")
+            hr_w = df_week["average_heartrate"].dropna()
+            n6.metric("FC media",   f"{hr_w.mean():.0f} bpm" if not hr_w.empty else "N/A")
+
+            if not df_week.empty:
+                st.markdown("##### Distribuzione sport")
+                sport_breakdown_chart(df_week, height=220)
+
+                # Progress bar verso obiettivo settimanale (km)
+                target_km = st.number_input("🎯 Obiettivo km settimana", value=50, min_value=0, step=5, key="target_km_w")
+                curr_km   = df_week["distance"].sum() / 1000
+                prog      = min(curr_km / target_km, 1.0) if target_km > 0 else 0
+                prog_color = "#4CAF50" if prog >= 1 else "#FF9800" if prog >= 0.6 else "#2196F3"
+                st.markdown(f"""
+                <div style='margin:8px 0 4px'>
+                    <div style='font-size:13px;color:#888'>Progressione km: {curr_km:.1f} / {target_km} km</div>
+                    <div style='background:rgba(255,255,255,0.08);border-radius:8px;height:12px;margin-top:6px'>
+                        <div style='background:{prog_color};width:{prog*100:.1f}%;height:12px;border-radius:8px;transition:width 0.4s'></div>
+                    </div>
+                </div>""", unsafe_allow_html=True)
+
+                st.markdown("##### Attività della settimana")
+                activity_list_table(df_week, n=20)
+            else:
+                st.info("Nessuna attività questa settimana.")
+
+        # ────────────────────────────────────
+        # TAB 2 — MESE CORRENTE
+        # ────────────────────────────────────
+        with tab_month:
+            # Selezione mese
+            available_months = df_r["start_date"].dt.to_period("M").unique()
+            available_months_str = [str(m) for m in sorted(available_months, reverse=True)]
+            sel_month = st.selectbox("Mese:", available_months_str, index=0, key="sel_month")
+            sel_period = pd.Period(sel_month, "M")
+
+            df_month_r = df_r[df_r["start_date"].dt.to_period("M") == sel_period]
+
+            # Stesso mese anno precedente per confronto
+            prev_year_period = pd.Period(f"{sel_period.year - 1}-{sel_period.month:02d}", "M")
+            df_month_py      = df_r[df_r["start_date"].dt.to_period("M") == prev_year_period]
+
+            st.markdown(f"#### {sel_period.strftime('%B %Y')}")
+
+            m1,m2,m3,m4,m5,m6,m7 = st.columns(7)
+            km_m   = df_month_r["distance"].sum()/1000
+            km_mpy = df_month_py["distance"].sum()/1000
+            ore_m  = df_month_r["moving_time"].sum()/3600
+            ore_mpy= df_month_py["moving_time"].sum()/3600
+            tss_m  = df_month_r["tss"].sum()
+            tss_mpy= df_month_py["tss"].sum()
+
+            m1.metric("Sessioni",   len(df_month_r), delta=str(len(df_month_r)-len(df_month_py)) if not df_month_py.empty else None)
+            m2.metric("Km",         f"{km_m:.1f}",   delta=f"{km_m-km_mpy:+.1f}" if not df_month_py.empty else None)
+            m3.metric("Ore",        f"{ore_m:.1f}",  delta=f"{ore_m-ore_mpy:+.1f}" if not df_month_py.empty else None)
+            m4.metric("TSS",        f"{tss_m:.0f}",  delta=f"{tss_m-tss_mpy:+.0f}" if not df_month_py.empty else None)
+            m5.metric("Dislivello", f"{(df_month_r['total_elevation_gain'].sum() or 0):.0f} m")
+            hr_mo = df_month_r["average_heartrate"].dropna()
+            m6.metric("FC media",   f"{hr_mo.mean():.0f}" if not hr_mo.empty else "N/A")
+            cal_mo = df_month_r["kilojoules"].sum() or 0
+            m7.metric("Calorie",    f"{cal_mo:.0f}" if cal_mo else "N/A")
+
+            if not df_month_r.empty:
+                st.markdown("##### Distribuzione sport")
+                sport_breakdown_chart(df_month_r, height=240)
+
+                # Grafico giornaliero del mese
+                st.markdown("##### Volume giornaliero (km)")
+                df_daily_m = df_month_r.copy()
+                df_daily_m["day"] = df_daily_m["start_date"].dt.date
+                daily_km = df_daily_m.groupby(["day","type"])["distance"].sum().reset_index()
+                daily_km["km"] = daily_km["distance"] / 1000
+                fig_dm = go.Figure()
+                for sport in daily_km["type"].unique():
+                    si  = get_sport_info(sport)
+                    sub = daily_km[daily_km["type"] == sport]
+                    fig_dm.add_trace(go.Bar(
+                        x=sub["day"], y=sub["km"],
+                        name=f"{si['icon']} {si['label']}",
+                        marker_color=si["color"], opacity=0.85,
+                    ))
+                fig_dm.update_layout(
+                    paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                    barmode="stack", height=220, margin=dict(l=0,r=0,t=10,b=0),
+                    legend=dict(orientation="h", y=1.1, font=dict(size=11)),
+                    xaxis=dict(gridcolor="rgba(255,255,255,0.05)", tickformat="%d"),
+                    yaxis=dict(gridcolor="rgba(255,255,255,0.05)", title="km"),
+                )
+                st.plotly_chart(fig_dm, use_container_width=True)
+
+                # Heatmap attività del mese
+                st.markdown("##### Giorni di allenamento")
+                import calendar as _cal
+                first_wd, n_days = _cal.monthrange(sel_period.year, sel_period.month)
+                active_days_m = set(df_month_r["start_date"].dt.day.tolist())
+                cal_html = "<div style='display:flex;gap:3px;flex-wrap:wrap;margin:8px 0'>"
+                # Offset lunedì
+                for _ in range(first_wd):
+                    cal_html += "<div style='width:32px;height:32px'></div>"
+                for day in range(1, n_days + 1):
+                    active = day in active_days_m
+                    bg     = "#4CAF50" if active else "rgba(255,255,255,0.05)"
+                    cal_html += (
+                        f"<div style='width:32px;height:32px;border-radius:6px;"
+                        f"background:{bg};display:flex;align-items:center;"
+                        f"justify-content:center;font-size:11px;"
+                        f"color:{'#fff' if active else '#555'}'>{day}</div>"
+                    )
+                cal_html += "</div>"
+                c_cal, c_stat = st.columns([2,1])
+                with c_cal:
+                    st.markdown(cal_html, unsafe_allow_html=True)
+                with c_stat:
+                    st.metric("Giorni attivi", f"{len(active_days_m)} / {n_days}")
+                    st.metric("% mese", f"{len(active_days_m)/n_days*100:.0f}%")
+                    if not df_month_py.empty:
+                        st.metric("vs stesso mese anno prec.", f"{len(active_days_m) - len(set(df_month_py['start_date'].dt.day.tolist())):+d} giorni")
+
+                st.markdown("##### Top attività del mese")
+                activity_list_table(df_month_r, n=10)
+            else:
+                st.info("Nessuna attività in questo mese.")
+
+        # ────────────────────────────────────
+        # TAB 3 — ANNO CORRENTE
+        # ────────────────────────────────────
+        with tab_year:
+            available_years = sorted(df_r["start_date"].dt.year.unique(), reverse=True)
+            sel_year = st.selectbox("Anno:", available_years, index=0, key="sel_year")
+            df_year_r = df_r[df_r["start_date"].dt.year == sel_year]
+
+            st.markdown(f"#### Anno {sel_year}")
+
+            y1,y2,y3,y4,y5,y6,y7 = st.columns(7)
+            km_y  = df_year_r["distance"].sum()/1000
+            ore_y = df_year_r["moving_time"].sum()/3600
+            tss_y = df_year_r["tss"].sum()
+            elev_y= df_year_r["total_elevation_gain"].sum() or 0
+            hr_y  = df_year_r["average_heartrate"].dropna()
+            cal_y = df_year_r["kilojoules"].sum() or 0
+
+            y1.metric("Sessioni",    len(df_year_r))
+            y2.metric("Km totali",   f"{km_y:.0f}")
+            y3.metric("Ore totali",  f"{ore_y:.0f}")
+            y4.metric("TSS totale",  f"{tss_y:.0f}")
+            y5.metric("Dislivello",  f"{elev_y/1000:.1f} km")
+            y6.metric("FC media",    f"{hr_y.mean():.0f}" if not hr_y.empty else "N/A")
+            y7.metric("Calorie",     f"{cal_y:.0f}" if cal_y else "N/A")
+
+            if not df_year_r.empty:
+                st.markdown("##### Distribuzione sport")
+                sport_breakdown_chart(df_year_r, height=260)
+
+                # Volume mensile per sport (barre stacked)
+                st.markdown("##### Volume mensile (km)")
+                df_year_r2 = df_year_r.copy()
+                df_year_r2["month"] = df_year_r2["start_date"].dt.to_period("M").dt.start_time
+                monthly = df_year_r2.groupby(["month","type"])["distance"].sum().reset_index()
+                monthly["km"] = monthly["distance"] / 1000
+                fig_my = go.Figure()
+                for sport in monthly["type"].unique():
+                    si  = get_sport_info(sport)
+                    sub = monthly[monthly["type"] == sport]
+                    fig_my.add_trace(go.Bar(
+                        x=sub["month"], y=sub["km"],
+                        name=f"{si['icon']} {si['label']}",
+                        marker_color=si["color"], opacity=0.85,
+                    ))
+                fig_my.update_layout(
+                    paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                    barmode="stack", height=280, margin=dict(l=0,r=0,t=10,b=0),
+                    legend=dict(orientation="h", y=1.08, font=dict(size=11)),
+                    xaxis=dict(gridcolor="rgba(255,255,255,0.05)", tickformat="%b"),
+                    yaxis=dict(gridcolor="rgba(255,255,255,0.05)", title="km"),
+                )
+                st.plotly_chart(fig_my, use_container_width=True)
+
+                # Sessioni per settimana (heatmap stile GitHub)
+                st.markdown("##### Heatmap attività annuale")
+                year_start_d = datetime(sel_year, 1, 1).date()
+                year_end_d   = datetime(sel_year, 12, 31).date()
+                active_dates_y = set(df_year_r["start_date"].dt.date.astype(str).tolist())
+                tss_by_date    = df_year_r.groupby(df_year_r["start_date"].dt.date.astype(str))["tss"].sum().to_dict()
+
+                # Costruzione griglia ISO settimane
+                d = year_start_d
+                weeks_data: list = []
+                current_wk: list = []
+                wd_offset = d.weekday()
+                for _ in range(wd_offset):
+                    current_wk.append(None)
+                while d <= year_end_d:
+                    current_wk.append(d)
+                    if d.weekday() == 6:
+                        weeks_data.append(current_wk)
+                        current_wk = []
+                    d += timedelta(days=1)
+                if current_wk:
+                    weeks_data.append(current_wk)
+
+                heat_html = "<div style='display:flex;gap:2px;overflow-x:auto'>"
+                for week in weeks_data:
+                    heat_html += "<div style='display:flex;flex-direction:column;gap:2px'>"
+                    for day_d in week:
+                        if day_d is None:
+                            heat_html += "<div style='width:12px;height:12px'></div>"
+                        else:
+                            ds    = str(day_d)
+                            tss_d = tss_by_date.get(ds, 0)
+                            if tss_d == 0:      bg = "rgba(255,255,255,0.05)"
+                            elif tss_d < 50:    bg = "#1b5e20"
+                            elif tss_d < 100:   bg = "#388e3c"
+                            elif tss_d < 150:   bg = "#66bb6a"
+                            else:               bg = "#a5d6a7"
+                            heat_html += (
+                                f"<div title='{ds} — TSS {tss_d:.0f}' "
+                                f"style='width:12px;height:12px;border-radius:2px;"
+                                f"background:{bg}'></div>"
+                            )
+                    heat_html += "</div>"
+                heat_html += "</div>"
+                heat_html += """
+                <div style='display:flex;gap:8px;align-items:center;margin-top:6px;font-size:11px;color:#666'>
+                    <span>Meno</span>
+                    <div style='width:12px;height:12px;border-radius:2px;background:rgba(255,255,255,0.05)'></div>
+                    <div style='width:12px;height:12px;border-radius:2px;background:#1b5e20'></div>
+                    <div style='width:12px;height:12px;border-radius:2px;background:#388e3c'></div>
+                    <div style='width:12px;height:12px;border-radius:2px;background:#66bb6a'></div>
+                    <div style='width:12px;height:12px;border-radius:2px;background:#a5d6a7'></div>
+                    <span>Più TSS</span>
+                </div>"""
+                st.markdown(heat_html, unsafe_allow_html=True)
+
+                # Medie mensili
+                st.divider()
+                st.markdown("##### Medie mensili")
+                avg_sess = len(df_year_r) / 12
+                avg_km   = km_y / 12
+                avg_ore  = ore_y / 12
+                avg_tss  = tss_y / 12
+                a1,a2,a3,a4 = st.columns(4)
+                a1.metric("Sessioni/mese", f"{avg_sess:.1f}")
+                a2.metric("Km/mese",       f"{avg_km:.0f}")
+                a3.metric("Ore/mese",      f"{avg_ore:.0f}")
+                a4.metric("TSS/mese",      f"{avg_tss:.0f}")
+            else:
+                st.info(f"Nessuna attività nel {sel_year}.")
+
+        # ────────────────────────────────────
+        # TAB 4 — CONFRONTO ANNO SU ANNO
+        # ────────────────────────────────────
+        with tab_yoy:
+            st.markdown("#### ↔️ Confronto Anno su Anno")
+            available_years_yoy = sorted(df_r["start_date"].dt.year.unique(), reverse=True)
+
+            if len(available_years_yoy) < 2:
+                st.info("Servono almeno 2 anni di dati per il confronto.")
+            else:
+                col_y1, col_y2 = st.columns(2)
+                with col_y1:
+                    year_a = st.selectbox("Anno A:", available_years_yoy, index=0, key="yoy_a")
+                with col_y2:
+                    year_b = st.selectbox("Anno B:", available_years_yoy,
+                                           index=min(1, len(available_years_yoy)-1), key="yoy_b")
+
+                df_ya = df_r[df_r["start_date"].dt.year == year_a]
+                df_yb = df_r[df_r["start_date"].dt.year == year_b]
+
+                # KPI confronto
+                def yoy_metric(label, val_a, val_b, fmt=".0f"):
+                    delta = val_a - val_b
+                    pct   = (delta / val_b * 100) if val_b else 0
+                    color = "#4CAF50" if delta >= 0 else "#F44336"
+                    return f"""
+                    <div style='background:rgba(255,255,255,0.03);border-radius:10px;padding:12px;text-align:center'>
+                        <div style='color:#888;font-size:12px'>{label}</div>
+                        <div style='font-size:20px;font-weight:700;color:#fff'>{val_a:{fmt}}</div>
+                        <div style='font-size:11px;color:#666'>{year_b}: {val_b:{fmt}}</div>
+                        <div style='font-size:13px;font-weight:700;color:{color}'>{delta:+{fmt}} ({pct:+.1f}%)</div>
+                    </div>"""
+
+                st.markdown(f"### {year_a} vs {year_b}")
+                cols_yoy = st.columns(5)
+                metrics_yoy = [
+                    ("Sessioni",    len(df_ya),                      len(df_yb),                      "d"),
+                    ("Km totali",   df_ya["distance"].sum()/1000,    df_yb["distance"].sum()/1000,    ".0f"),
+                    ("Ore totali",  df_ya["moving_time"].sum()/3600, df_yb["moving_time"].sum()/3600, ".0f"),
+                    ("TSS totale",  df_ya["tss"].sum(),              df_yb["tss"].sum(),              ".0f"),
+                    ("Dislivello",  df_ya["total_elevation_gain"].sum() or 0,
+                                    df_yb["total_elevation_gain"].sum() or 0, ".0f"),
+                ]
+                for i, (label, va, vb, fmt) in enumerate(metrics_yoy):
+                    cols_yoy[i].markdown(yoy_metric(label, va, vb, fmt), unsafe_allow_html=True)
+
+                st.divider()
+
+                # Grafico mensile sovrapposto — km
+                st.markdown("##### Confronto volume mensile (km)")
+                months_range = range(1, 13)
+                months_label = ["Gen","Feb","Mar","Apr","Mag","Giu","Lug","Ago","Set","Ott","Nov","Dic"]
+
+                km_ya_m = [df_ya[df_ya["start_date"].dt.month == m]["distance"].sum()/1000 for m in months_range]
+                km_yb_m = [df_yb[df_yb["start_date"].dt.month == m]["distance"].sum()/1000 for m in months_range]
+
+                fig_yoy = go.Figure()
+                fig_yoy.add_trace(go.Scatter(
+                    x=months_label, y=km_ya_m, name=str(year_a),
+                    line=dict(color="#e94560", width=2.5), mode="lines+markers",
+                    fill="tozeroy", fillcolor="rgba(233,69,96,0.08)",
+                ))
+                fig_yoy.add_trace(go.Scatter(
+                    x=months_label, y=km_yb_m, name=str(year_b),
+                    line=dict(color="#2196F3", width=2, dash="dot"), mode="lines+markers",
+                ))
+                fig_yoy.update_layout(
+                    paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                    height=280, margin=dict(l=0,r=0,t=10,b=0),
+                    legend=dict(orientation="h", y=1.08),
+                    xaxis=dict(gridcolor="rgba(255,255,255,0.05)"),
+                    yaxis=dict(gridcolor="rgba(255,255,255,0.05)", title="km"),
+                )
+                st.plotly_chart(fig_yoy, use_container_width=True)
+
+                # Confronto TSS mensile
+                st.markdown("##### Confronto TSS mensile")
+                tss_ya_m = [df_ya[df_ya["start_date"].dt.month == m]["tss"].sum() for m in months_range]
+                tss_yb_m = [df_yb[df_yb["start_date"].dt.month == m]["tss"].sum() for m in months_range]
+
+                fig_tss_yoy = go.Figure()
+                fig_tss_yoy.add_trace(go.Bar(x=months_label, y=tss_ya_m, name=str(year_a),
+                                              marker_color="#e94560", opacity=0.8))
+                fig_tss_yoy.add_trace(go.Bar(x=months_label, y=tss_yb_m, name=str(year_b),
+                                              marker_color="#2196F3", opacity=0.6))
+                fig_tss_yoy.update_layout(
+                    paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                    barmode="group", height=240, margin=dict(l=0,r=0,t=10,b=0),
+                    legend=dict(orientation="h", y=1.08),
+                    xaxis=dict(gridcolor="rgba(255,255,255,0.05)"),
+                    yaxis=dict(gridcolor="rgba(255,255,255,0.05)", title="TSS"),
+                )
+                st.plotly_chart(fig_tss_yoy, use_container_width=True)
+
+                # Sessioni per sport confronto
+                st.markdown("##### Sessioni per sport")
+                sports_union = set(df_ya["type"].unique()) | set(df_yb["type"].unique())
+                sport_comp = []
+                for sport in sports_union:
+                    si = get_sport_info(sport)
+                    sport_comp.append({
+                        "Sport": f"{si['icon']} {si['label']}",
+                        f"Sessioni {year_a}": len(df_ya[df_ya["type"]==sport]),
+                        f"Km {year_a}":       round(df_ya[df_ya["type"]==sport]["distance"].sum()/1000, 1),
+                        f"Sessioni {year_b}": len(df_yb[df_yb["type"]==sport]),
+                        f"Km {year_b}":       round(df_yb[df_yb["type"]==sport]["distance"].sum()/1000, 1),
+                    })
+                sport_comp_df = pd.DataFrame(sport_comp).sort_values(f"Km {year_a}", ascending=False)
+                st.dataframe(sport_comp_df, use_container_width=True, hide_index=True)
 
     # ============================================================
     # CALENDARIO
@@ -1326,7 +2029,7 @@ if token_ok:
             ds = str(d)
             has = ds in days_with_activity
             color = "#4CAF50" if has else "#1e1e2e"
-            border = "#4CAF5055" if has else "#333"
+            border = "rgba(76,175,80,0.33)" if has else "#333"
             current_week.append(f'<div title="{ds}" style="width:14px;height:14px;border-radius:3px;background:{color};border:1px solid {border}"></div>')
             if d.weekday() == 6:
                 week_cols.append("".join(current_week))
