@@ -3,7 +3,6 @@ import requests
 import pandas as pd
 import numpy as np
 import os
-import google.generativeai as genai
 import polyline
 import folium
 from streamlit_folium import st_folium
@@ -26,8 +25,66 @@ CLIENT_ID     = get_secret("STRAVA_CLIENT_ID")
 CLIENT_SECRET = get_secret("STRAVA_CLIENT_SECRET")
 GEMINI_KEY    = get_secret("GOOGLE_API_KEY")
 
+# ── Inizializzazione AI — supporta sia google-genai (nuova) che google-generativeai (vecchia) ──
+_ai_client   = None
+_ai_sdk_mode = None   # "new" | "old" | None
+
 if GEMINI_KEY:
-    genai.configure(api_key=GEMINI_KEY)
+    # Prima prova la nuova SDK google-genai (consigliata per nuovi account)
+    try:
+        import google.genai as genai_new
+        _ai_client   = genai_new.Client(api_key=GEMINI_KEY)
+        _ai_sdk_mode = "new"
+    except ImportError:
+        pass
+
+    # Fallback: vecchia SDK google-generativeai
+    if _ai_sdk_mode is None:
+        try:
+            import google.generativeai as genai_old
+            genai_old.configure(api_key=GEMINI_KEY)
+            _ai_client   = genai_old
+            _ai_sdk_mode = "old"
+        except ImportError:
+            pass
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def get_available_models(api_key: str) -> list[str]:
+    """
+    Scopre i modelli realmente disponibili per questa API key.
+    Usa la nuova SDK se disponibile, altrimenti la vecchia.
+    Ritorna sempre almeno un modello funzionante.
+    """
+    models_found = []
+    if _ai_sdk_mode == "new":
+        try:
+            for m in _ai_client.models.list():
+                name = m.name.replace("models/", "")
+                if "gemini" in name and "embedding" not in name and "aqa" not in name:
+                    models_found.append(name)
+        except Exception:
+            pass
+    elif _ai_sdk_mode == "old":
+        try:
+            for m in _ai_client.list_models():
+                if "generateContent" in m.supported_generation_methods:
+                    name = m.name.replace("models/", "")
+                    if "gemini" in name:
+                        models_found.append(name)
+        except Exception:
+            pass
+
+    # Ordine preferito: 2.0 prima, poi 1.5
+    preferred = [
+        "gemini-2.0-flash", "gemini-2.0-flash-lite", "gemini-2.0-flash-exp",
+        "gemini-1.5-flash", "gemini-1.5-flash-8b", "gemini-1.5-pro",
+    ]
+    # Prima i preferiti trovati, poi tutto il resto scoperto
+    ordered = [m for m in preferred if m in models_found]
+    ordered += [m for m in models_found if m not in ordered]
+
+    # Se auto-discovery vuota, usa fallback sicuro
+    return ordered if ordered else ["gemini-2.0-flash", "gemini-1.5-flash"]
 
 st.set_page_config(page_title="Elite AI Coach Pro", page_icon="🏆", layout="wide")
 
@@ -684,44 +741,33 @@ if token_ok:
         ], label_visibility="collapsed")
 
         st.divider()
-        # Modelli disponibili — lista curata con fallback all'auto-discovery
-        AVAILABLE_MODELS = [
-            "gemini-1.5-flash",
-            "gemini-1.5-flash-8b",
-            "gemini-1.5-pro",
-            "gemini-2.0-flash",
-            "gemini-2.0-flash-lite",
-        ]
-        try:
-            discovered_raw = [m.name for m in genai.list_models()
-                               if "generateContent" in m.supported_generation_methods
-                               and "gemini" in m.name]
-            # Normalizza: rimuovi prefisso "models/" che alcune versioni API restituiscono
-            discovered = [m.replace("models/", "") for m in discovered_raw]
-            # Unisci lista curata + scoperta, rimuovi duplicati mantenendo ordine
-            all_models = AVAILABLE_MODELS + [m for m in discovered if m not in AVAILABLE_MODELS]
-        except Exception:
-            all_models = AVAILABLE_MODELS
+        # Auto-discovery modelli realmente disponibili per questa API key
+        all_models = get_available_models(GEMINI_KEY or "")
 
-        # Prova a recuperare l'ultimo modello usato
         default_idx = 0
         if "sel_model" in st.session_state and st.session_state.sel_model in all_models:
             default_idx = all_models.index(st.session_state.sel_model)
 
-        sel_model = st.selectbox("🧠 Modello AI:", all_models, index=default_idx,
-                                  help="gemini-1.5-flash/pro: stabile. gemini-2.0: più recente ma con quote più basse.")
+        sdk_badge = "🆕 google-genai" if _ai_sdk_mode == "new" else "🔄 generativeai" if _ai_sdk_mode == "old" else "⚠️ SDK mancante"
+        sel_model = st.selectbox(
+            f"🧠 Modello AI:", all_models, index=default_idx,
+            help=f"SDK: {sdk_badge}. Modelli scoperti dalla tua API key. 2.0=nuovi account, 1.5=account precedenti."
+        )
         st.session_state.sel_model = sel_model
+        st.caption(sdk_badge)
 
-        # Wrapper chiamata AI — gestisce automaticamente il prefisso corretto
         def ai_generate(prompt: str) -> str:
-            try:
-                return ai_generate(prompt)
-            except Exception:
-                # Fallback: prova con prefisso models/
-                try:
-                    return genai.GenerativeModel(f"models/{sel_model}").generate_content(prompt).text
-                except Exception as e2:
-                    raise e2
+            """Wrapper unificato — funziona sia con nuova SDK google-genai che vecchia google-generativeai."""
+            if _ai_sdk_mode is None:
+                raise RuntimeError("Nessuna SDK Gemini. Controlla requirements.txt.")
+            if _ai_sdk_mode == "new":
+                response = _ai_client.models.generate_content(
+                    model=sel_model,
+                    contents=prompt,
+                )
+                return response.text
+            else:
+                return _ai_client.GenerativeModel(sel_model).generate_content(prompt).text
 
         st.divider()
         col_s1, col_s2, col_s3 = st.columns(3)
@@ -1954,13 +2000,15 @@ if token_ok:
                         sf.add(sport)
                     st.rerun()
 
-        col_all, col_none = st.columns([1, 6])
+        col_all, col_none, _ = st.columns([1, 1, 5])
         with col_all:
             if st.button("✅ Tutti", use_container_width=True):
                 st.session_state.sport_filter = set(all_sports)
                 st.rerun()
         with col_none:
-            pass
+            if st.button("❌ Nessuno", use_container_width=True):
+                st.session_state.sport_filter = set()
+                st.rerun()
 
         df_filtered = df[df["type"].isin(st.session_state.sport_filter)]
 
