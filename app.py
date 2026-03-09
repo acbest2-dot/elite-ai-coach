@@ -27,15 +27,7 @@ if GEMINI_KEY:
 
 st.set_page_config(page_title="Elite AI Coach", page_icon="🏃‍♂️", layout="wide")
 
-# --- 2. STILE CSS ---
-st.markdown("""
-    <style>
-    .stApp { background-color: #FFFFFF; color: #31333F; }
-    .stMetric { background-color: #F8F9FA; padding: 15px; border-radius: 10px; border-left: 5px solid #FF4B4B; }
-    </style>
-    """, unsafe_allow_html=True)
-
-# --- 3. FUNZIONI TECNICHE ---
+# --- 2. FUNZIONI TECNICHE ---
 def format_pace(seconds_per_km):
     if seconds_per_km <= 0 or pd.isna(seconds_per_km): return "0:00"
     minutes = int(seconds_per_km // 60)
@@ -61,7 +53,7 @@ def draw_map(encoded_polyline):
         return m
     except: return None
 
-# --- 4. LOGIN & SESSION STATE ---
+# --- 3. SESSION STATE & LOGIN ---
 if "strava_token" not in st.session_state: st.session_state.strava_token = None
 if "messages" not in st.session_state: st.session_state.messages = []
 if "user_data" not in st.session_state:
@@ -78,7 +70,7 @@ if "code" in query_params and st.session_state.strava_token is None:
         st.query_params.clear()
         st.rerun()
 
-# --- 5. INTERFACCIA PRINCIPALE ---
+# --- 4. INTERFACCIA PRINCIPALE ---
 if st.session_state.strava_token:
     token = st.session_state.strava_token
     r = requests.get("https://www.strava.com/api/v3/athlete/activities?per_page=100", 
@@ -88,7 +80,7 @@ if st.session_state.strava_token:
         df = pd.DataFrame(r.json())
         df['start_date'] = pd.to_datetime(df['start_date_local']).dt.tz_localize(None)
         
-        # Calcolo TSS e Carichi (CTL/ATL)
+        # Calcolo Fitness (CTL/ATL/TSB)
         u = st.session_state.user_data
         df['tss'] = df.apply(lambda x: safe_calculate_tss(x, u['fc_min'], u['fc_max']), axis=1)
         df = df.sort_values('start_date')
@@ -99,77 +91,84 @@ if st.session_state.strava_token:
         atl = daily_full.ewm(span=7).mean()
         tsb = ctl - atl
 
+        # Dati ultima attività pronti per tutte le sezioni
+        last_act = df.iloc[-1]
+        last_dist = last_act['distance']/1000
+        last_pace = format_pace(last_act['moving_time']/last_dist)
+
         with st.sidebar:
-            st.title("Elite AI Coach")
-            menu = st.radio("MENU", ["DASHBOARD", "CALENDARIO", "AI COACH", "PROFILO"])
-            if menu == "AI COACH":
-                ai_mode = st.radio("Modalità AI:", ["LIGHT", "PRO"])
+            st.title("Elite AI Settings")
+            menu = st.radio("VAI A:", ["DASHBOARD", "CALENDARIO", "AI COACH", "PROFILO"])
+            st.divider()
+            ai_mode = st.radio("Cervello AI:", ["LIGHT", "PRO"])
             if st.button("Logout"):
                 st.session_state.strava_token = None
                 st.rerun()
 
-        # DASHBOARD
+        # --- DASHBOARD ---
         if menu == "DASHBOARD":
-            st.header("📊 Performance Metrics")
+            st.header("📊 Performance & Carico")
             c1, c2, c3 = st.columns(3)
             c1.metric("Fitness (CTL)", f"{ctl.iloc[-1]:.1f}")
             c2.metric("Fatica (ATL)", f"{atl.iloc[-1]:.1f}")
             c3.metric("Forma (TSB)", f"{tsb.iloc[-1]:.1f}")
             st.area_chart(pd.DataFrame({'Fitness': ctl, 'Fatica': atl, 'Forma': tsb}))
             
-            if not df.empty:
-                last = df.iloc[-1]
-                dist_km = last['distance']/1000
-                st.subheader(f"🏁 Ultima Attività: {last['name']}")
-                col_map, col_info = st.columns([2, 1])
-                with col_info:
-                    st.metric("Distanza", f"{dist_km:.2f} km")
-                    st.metric("Passo", format_pace(last['moving_time']/dist_km))
-                with col_map:
-                    m = draw_map(last.get('map', {}).get('summary_polyline'))
-                    if m: st_folium(m, width=700, height=300, key="map")
+            st.divider()
+            st.subheader(f"🏁 Ultima Sessione: {last_act['name']}")
+            col1, col2 = st.columns([1, 2])
+            with col1:
+                st.metric("Distanza", f"{last_dist:.2f} km")
+                st.metric("Passo", last_pace)
+            with col2:
+                m = draw_map(last_act.get('map', {}).get('summary_polyline'))
+                if m: st_folium(m, width=700, height=350, key="dash_map")
 
-        # CALENDARIO
+        # --- CALENDARIO ---
         elif menu == "CALENDARIO":
-            events = [{"title": f"{row['type']} ({row['tss']:.0f} TSS)", "start": row['start_date'].isoformat()} for _, row in df.iterrows()]
+            st.header("📅 Diario Allenamenti")
+            events = [{"title": f"{a['type']} ({a['distance']/1000:.1f}k)", "start": a['start_date_local']} for a in activities]
             calendar(events=events)
 
-        # AI COACH (FIXED)
+        # --- AI COACH CON PULSANTE CLEAR ---
         elif menu == "AI COACH":
-            st.header(f"💬 Coach AI ({ai_mode})")
+            col_head, col_clear = st.columns([3, 1])
+            with col_head:
+                st.header(f"💬 Coach AI ({ai_mode})")
+            with col_clear:
+                if st.button("🗑️ Pulisci Chat"):
+                    st.session_state.messages = []
+                    st.rerun()
+
             for m in st.session_state.messages:
                 with st.chat_message(m["role"]): st.markdown(m["content"])
             
-            if prompt := st.chat_input("Chiedi analisi..."):
+            if prompt := st.chat_input("Chiedi analisi o consigli..."):
                 st.session_state.messages.append({"role": "user", "content": prompt})
                 with st.chat_message("user"): st.markdown(prompt)
                 
-                # Definiamo i dati dell'ultima attività per l'AI
-                last_act = df.iloc[-1]
-                d_km = last_act['distance']/1000
-                
-                context = f"Atleta: {u}. CTL: {ctl.iloc[-1]:.1f}. TSB: {tsb.iloc[-1]:.1f}. Ultima corsa: {d_km:.1f}km."
+                context = f"Atleta {u['peso']}kg. Fitness {ctl.iloc[-1]:.1f}. Ultima corsa {last_dist:.1f}km."
                 m_name = 'gemini-1.5-flash' if ai_mode == "LIGHT" else 'gemini-1.5-pro'
                 
                 try:
                     model = genai.GenerativeModel(m_name)
                     response = model.generate_content(f"{context}\n\nDomanda: {prompt}").text
                 except Exception as e:
-                    response = f"⚠️ Errore con {m_name}. Prova la modalità LIGHT. Errore: {str(e)}"
+                    response = f"⚠️ Errore AI: {str(e)}"
 
                 with st.chat_message("assistant"): st.markdown(response)
                 st.session_state.messages.append({"role": "assistant", "content": response})
 
-        # PROFILO
+        # --- PROFILO ---
         elif menu == "PROFILO":
-            st.header("👤 Profilo Fisico")
-            with st.form("settings"):
+            st.header("👤 Impostazioni Atleta")
+            with st.form("p_form"):
                 u['peso'] = st.number_input("Peso (kg)", value=float(u['peso']))
                 u['fc_min'] = st.number_input("FC Riposo", value=int(u['fc_min']))
                 u['fc_max'] = st.number_input("FC Max", value=int(u['fc_max']))
-                if st.form_submit_button("Salva"):
+                if st.form_submit_button("Salva Profilo"):
                     st.session_state.user_data = u
-                    st.success("Dati salvati!")
+                    st.success("Profilo salvato!")
 
 else:
     st.title("🚀 Elite AI Performance Hub")
