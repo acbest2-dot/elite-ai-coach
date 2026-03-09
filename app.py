@@ -11,7 +11,6 @@ from streamlit_calendar import calendar
 from datetime import datetime
 
 # --- 1. CONFIGURAZIONE CHIAVI & URL ---
-# Assicurati che questo URL sia ESATTAMENTE quello registrato su Strava Dashboard
 REDIRECT_URI = "https://elite-ai-coach-4lm2ecs6qfslfkkzaeacrd.streamlit.app"
 
 def get_secret(key):
@@ -73,18 +72,39 @@ if st.session_state.strava_token:
         ctl = df['tss'].ewm(span=42).mean()
         tsb = ctl - df['tss'].ewm(span=7).mean()
 
-        # Variabili globali per la chat (Fix NameError)
+        # Variabili per la chat
         last_act = df.iloc[-1]
-        dist_km = last_act['distance'] / 1000  # Usiamo dist_km per coerenza con l'errore visto
+        dist_km = last_act['distance'] / 1000
         pace_str = format_pace(last_act['moving_time'] / dist_km)
 
         with st.sidebar:
             st.title("Elite Menu")
             menu = st.radio("VAI A:", ["DASHBOARD", "CALENDARIO", "AI COACH", "PROFILO"])
             st.divider()
-            # Nomi modelli completi per evitare 404
-            ai_model_name = st.selectbox("Modello AI:", 
-                                       ["models/gemini-2.0-flash", "models/gemini-1.5-pro", "models/gemini-1.5-flash"])
+            
+            # --- AUTO-DISCOVERY DEI MODELLI ---
+            st.write("🧠 **Status AI**")
+            available_models = []
+            try:
+                # Chiede a Google quali modelli esistono davvero per questa chiave
+                for m in genai.list_models():
+                    if 'generateContent' in m.supported_generation_methods:
+                        available_models.append(m.name)
+            except Exception as e:
+                st.error("Errore API Key!")
+
+            if available_models:
+                # Pre-seleziona un modello valido (es. cerca flash)
+                default_idx = 0
+                for i, name in enumerate(available_models):
+                    if "flash" in name:
+                        default_idx = i
+                        break
+                ai_model_name = st.selectbox("Modello Attivo:", available_models, index=default_idx)
+            else:
+                st.warning("Nessun modello trovato.")
+                ai_model_name = None
+
             if st.button("Logout"):
                 st.session_state.strava_token = None
                 st.rerun()
@@ -113,18 +133,15 @@ if st.session_state.strava_token:
                 
                 context = f"Atleta {u['peso']}kg. CTL {ctl.iloc[-1]:.1f}. Ultima corsa {dist_km:.2f}km a {pace_str}."
                 
-                try:
-                    # Chiamata al modello selezionato
-                    model = genai.GenerativeModel(ai_model_name)
-                    response = model.generate_content(f"{context}\n\nDomanda: {prompt}").text
-                except Exception as e:
-                    # Fallback robusto su 1.5 Flash in caso di quota esaurita o errore 404
-                    st.warning(f"Modello {ai_model_name} non disponibile o quota esaurita. Provo il recupero...")
+                if ai_model_name:
                     try:
-                        fallback_model = genai.GenerativeModel("models/gemini-1.5-flash")
-                        response = fallback_model.generate_content(f"{context}\n\nDomanda: {prompt}").text
-                    except Exception as e2:
-                        response = f"⚠️ Errore critico AI: {str(e2)}"
+                        # Ora usiamo un nome che siamo CERTI esista
+                        model = genai.GenerativeModel(ai_model_name)
+                        response = model.generate_content(f"{context}\n\nDomanda: {prompt}").text
+                    except Exception as e:
+                        response = f"⚠️ Errore di connessione col modello {ai_model_name}: {str(e)}"
+                else:
+                    response = "⚠️ Nessun modello selezionato o API Key non valida."
 
                 with st.chat_message("assistant"): st.markdown(response)
                 st.session_state.messages.append({"role": "assistant", "content": response})
@@ -140,6 +157,5 @@ if st.session_state.strava_token:
                     st.success("Dati aggiornati!")
 else:
     st.title("🚀 Elite AI Performance Hub")
-    # Nota: Assicurati che CLIENT_ID sia correttamente caricato dai secrets
     auth_url = f"https://www.strava.com/oauth/authorize?client_id={CLIENT_ID}&response_type=code&redirect_uri={REDIRECT_URI}&scope=read,activity:read_all&approval_prompt=force"
     st.link_button("🔥 Connetti Strava", auth_url)
