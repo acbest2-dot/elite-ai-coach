@@ -20,9 +20,10 @@ GEMINI_KEY = st.secrets.get("GOOGLE_API_KEY") or os.getenv("GOOGLE_API_KEY")
 # Determina URL di reindirizzamento
 if "streamlit.app" in st.get_option("browser.serverAddress") or "share.streamlit.io" in st.get_option("browser.serverAddress"):
     # Sostituisci con il tuo URL reale dopo il primo deploy
-    REDIRECT_URI = "https://acbest2-dot-elite-ai-coach.streamlit.app"
+    REDIRECT_URI = "https://elite-ai-coach-4lm2ecs6qfslfkkzaeacrd.streamlit.app/"
 else:
-    REDIRECT_URI = 'http://localhost:8501'
+    auth_url = f"https://www.strava.com/oauth/authorize?client_id={CLIENT_ID}&gateway_type=code&redirect_uri={REDIRECT_URI}&response_type=code&scope=read,activity:read_all&approval_prompt=force"
+st.link_button("🔥 Connetti il tuo Strava", auth_url)
 
 if GEMINI_KEY:
     genai.configure(api_key=GEMINI_KEY)
