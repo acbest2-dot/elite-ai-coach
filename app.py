@@ -693,9 +693,11 @@ if token_ok:
             "gemini-2.0-flash-lite",
         ]
         try:
-            discovered = [m.name for m in genai.list_models()
-                          if "generateContent" in m.supported_generation_methods
-                          and "gemini" in m.name]
+            discovered_raw = [m.name for m in genai.list_models()
+                               if "generateContent" in m.supported_generation_methods
+                               and "gemini" in m.name]
+            # Normalizza: rimuovi prefisso "models/" che alcune versioni API restituiscono
+            discovered = [m.replace("models/", "") for m in discovered_raw]
             # Unisci lista curata + scoperta, rimuovi duplicati mantenendo ordine
             all_models = AVAILABLE_MODELS + [m for m in discovered if m not in AVAILABLE_MODELS]
         except Exception:
@@ -707,8 +709,19 @@ if token_ok:
             default_idx = all_models.index(st.session_state.sel_model)
 
         sel_model = st.selectbox("🧠 Modello AI:", all_models, index=default_idx,
-                                  help="gemini-1.5-flash/pro: stabile e senza limiti aggiuntivi. gemini-2.0: più recente ma con quote più basse.")
+                                  help="gemini-1.5-flash/pro: stabile. gemini-2.0: più recente ma con quote più basse.")
         st.session_state.sel_model = sel_model
+
+        # Wrapper chiamata AI — gestisce automaticamente il prefisso corretto
+        def ai_generate(prompt: str) -> str:
+            try:
+                return ai_generate(prompt)
+            except Exception:
+                # Fallback: prova con prefisso models/
+                try:
+                    return genai.GenerativeModel(f"models/{sel_model}").generate_content(prompt).text
+                except Exception as e2:
+                    raise e2
 
         st.divider()
         col_s1, col_s2, col_s3 = st.columns(3)
@@ -898,7 +911,7 @@ if token_ok:
                     "come influisce sul carico settimanale, e suggerisci cosa fare nella prossima sessione "
                     "in base allo stato di forma attuale. Sii specifico e pratico. Usa massimo 4 paragrafi."
                 )
-                result = genai.GenerativeModel(sel_model).generate_content(f"{ctx}\n\n{prompt}").text
+                result = ai_generate(f"{ctx}\n\n{prompt}")
                 st.info(result)
             except Exception as e:
                 st.error(f"Errore AI: {e}")
@@ -971,9 +984,7 @@ if token_ok:
                     "cosa sta andando bene, cosa richiede attenzione, e il consiglio più importante per questa settimana. "
                     "Tono professionale ma diretto. No elenchi puntati, solo testo fluido."
                 )
-                quick_summary = genai.GenerativeModel(sel_model).generate_content(
-                    f"{ctx_quick}\n\n{prompt_quick}"
-                ).text
+                quick_summary = ai_generate(f"{ctx_quick}\n\n{prompt_quick}")
                 st.markdown(f"""
                 <div style="background:rgba(33,150,243,0.08); border-left:3px solid #2196F3;
                              border-radius:0 12px 12px 0; padding:14px 18px; margin-bottom:16px;">
@@ -1235,9 +1246,9 @@ if token_ok:
                     <div style="color:{vo2_color}; font-size:14px; font-weight:700; margin-top:4px">{vo2_label}</div>
                 </div>
                 """, unsafe_allow_html=True)
-                # Mini gauge VO2max
+                # Mini gauge VO2max — mostra solo il semicerchio, il numero è già nel card sopra
                 fig_vo2 = go.Figure(go.Indicator(
-                    mode="gauge+number",
+                    mode="gauge",
                     value=vo2max_val,
                     gauge={
                         "axis": {"range": [20, 85]},
@@ -1250,7 +1261,6 @@ if token_ok:
                             {"range": [65, 85], "color": "rgba(156,39,176,0.15)"},
                         ],
                     },
-                    number={"font": {"size": 0}},
                 ))
                 fig_vo2.update_layout(paper_bgcolor="rgba(0,0,0,0)", height=120,
                                        margin=dict(l=10, r=10, t=10, b=0),
@@ -1336,9 +1346,7 @@ if token_ok:
                             "5) Raccomandazioni concrete per le prossime 2 settimane. "
                             "Usa terminologia tecnica. Sii diretto e specifico."
                         )
-                        result_fit = genai.GenerativeModel(sel_model).generate_content(
-                            f"{ctx_fitness}\n\n{prompt_fitness}"
-                        ).text
+                        result_fit = ai_generate(f"{ctx_fitness}\n\n{prompt_fitness}")
                         st.session_state["analisi_fisica"] = result_fit
                     except Exception as e:
                         st.error(f"Errore AI: {e}")
@@ -1371,9 +1379,7 @@ if token_ok:
                             "Se ACWR > 1.3 riduci il volume. Se TSB < -20 inserisci più recupero. "
                             "Formato: Giorno N — [tipo]: descrizione dettagliata."
                         )
-                        result_plan = genai.GenerativeModel(sel_model).generate_content(
-                            f"{ctx_plan}\n\n{prompt_plan}"
-                        ).text
+                        result_plan = ai_generate(f"{ctx_plan}\n\n{prompt_plan}")
                         st.session_state["piano_7gg"] = result_plan
                     except Exception as e:
                         st.error(f"Errore AI: {e}")
@@ -2089,9 +2095,7 @@ if token_ok:
                 f"Ultima sessione: {df.iloc[-1]['type']} — {df.iloc[-1]['distance']/1000:.1f}km."
             )
             try:
-                res = genai.GenerativeModel(sel_model).generate_content(
-                    system_ctx + "\n\nDomanda dell'atleta: " + prompt
-                ).text
+                res = ai_generate(system_ctx + "\n\nDomanda dell'atleta: " + prompt)
             except Exception as e:
                 res = f"⚠️ Errore: {e}"
 
