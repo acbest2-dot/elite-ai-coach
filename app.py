@@ -1,53 +1,43 @@
-mport streamlit as st
+import streamlit as st
 import requests
 import pandas as pd
+import numpy as np
 import os
 import google.generativeai as genai
+import polyline
+import folium
+from streamlit_folium import st_folium
+from streamlit_calendar import calendar
+from datetime import datetime, timedelta
 
-# --- 1. CARICAMENTO SICURO DELLE CHIAVI ---
-# Proviamo a prenderle dai Secrets di Streamlit Cloud
+# --- 1. CONFIGURAZIONE CHIAVI & URL FISSO ---
+REDIRECT_URI = "https://elite-ai-coach-4lm2ecs6qfslfkkzaeacrd.streamlit.app/"
+
 try:
     CLIENT_ID = st.secrets["STRAVA_CLIENT_ID"]
     CLIENT_SECRET = st.secrets["STRAVA_CLIENT_SECRET"]
     GEMINI_KEY = st.secrets["GOOGLE_API_KEY"]
 except:
-    # Se fallisce (magari sei in locale), prova con os.getenv
     CLIENT_ID = os.getenv("STRAVA_CLIENT_ID")
     CLIENT_SECRET = os.getenv("STRAVA_CLIENT_SECRET")
     GEMINI_KEY = os.getenv("GOOGLE_API_KEY")
 
-# URL FISSO PER EVITARE ERRORI LOCALHOST
-REDIRECT_URI = "https://elite-ai-coach-4lm2ecs6qfslfkkzaeacrd.streamlit.app/"
-
-# Controllo di sicurezza: se mancano le chiavi, avvisa l'utente invece di crashare
-if not CLIENT_ID or not CLIENT_SECRET:
-    st.error("⚠️ Errore: Chiavi Strava mancanti nei Secrets di Streamlit!")
-    st.stop()
-
-# Determina URL di reindirizzamento
-if "streamlit.app" in st.get_option("browser.serverAddress") or "share.streamlit.io" in st.get_option("browser.serverAddress"):
-    # Sostituisci con il tuo URL reale dopo il primo deploy
-    REDIRECT_URI = "https://elite-ai-coach-4lm2ecs6qfslfkkzaeacrd.streamlit.app/"
-else:
-    auth_url = f"https://www.strava.com/oauth/authorize?client_id={CLIENT_ID}&gateway_type=code&redirect_uri={REDIRECT_URI}&response_type=code&scope=read,activity:read_all&approval_prompt=force"
-st.link_button("🔥 Connetti il tuo Strava", auth_url)
-
 if GEMINI_KEY:
     genai.configure(api_key=GEMINI_KEY)
-    available_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
+    model = genai.GenerativeModel('gemini-1.5-flash')
 
 st.set_page_config(page_title="Elite AI Coach", page_icon="🏃‍♂️", layout="wide")
 
-# --- 2. STILE LIGHT MODE ---
+# --- 2. STILE LIGHT MODE & CUSTOM CSS ---
 st.markdown("""
     <style>
     .stApp { background-color: #FFFFFF; color: #31333F; }
-    .stMetric { background-color: #F0F2F6; padding: 15px; border-radius: 10px; border-left: 5px solid #FF4B4B; }
-    .main-card { background: #f8f9fa; border-radius: 15px; padding: 25px; border: 1px solid #dee2e6; margin-bottom: 20px; }
+    .stMetric { background-color: #F8F9FA; padding: 15px; border-radius: 10px; border-left: 5px solid #FF4B4B; }
+    .main-card { background: #f8f9fa; border-radius: 15px; padding: 20px; border: 1px solid #dee2e6; }
     </style>
     """, unsafe_allow_html=True)
 
-# --- 3. FUNZIONI TECNICHE ---
+# --- 3. FUNZIONI TECNICHE DI CALCOLO ---
 def format_pace(seconds_per_km):
     if seconds_per_km <= 0 or pd.isna(seconds_per_km): return "0:00"
     minutes = int(seconds_per_km // 60)
@@ -57,7 +47,9 @@ def format_pace(seconds_per_km):
 def calculate_swimming_pace(seconds, distance_meters):
     if distance_meters <= 0: return "0:00"
     pace_100m = (seconds / distance_meters) * 100
-    return format_pace(pace_100m)
+    minutes = int(pace_100m // 60)
+    seconds = int(pace_100m % 60)
+    return f"{minutes}:{seconds:02d}"
 
 def safe_calculate_tss(row, fc_min, fc_max):
     try:
@@ -66,25 +58,26 @@ def safe_calculate_tss(row, fc_min, fc_max):
         if hr_avg > 0 and fc_max > fc_min:
             intensity = (hr_avg - fc_min) / (fc_max - fc_min)
             return (duration_min * hr_avg * intensity) / (fc_max * 60) * 100
-        return duration_min * 0.5
+        return duration_min * 0.6  # Stima basata su tempo se manca FC
     except: return 0
 
 def draw_map(encoded_polyline):
     if not encoded_polyline: return None
     try:
         points = polyline.decode(encoded_polyline)
-        m = folium.Map(location=points[0], zoom_start=14, tiles="OpenStreetMap")
+        m = folium.Map(location=points[0], zoom_start=14)
         folium.PolyLine(points, color="#FF4B4B", weight=5, opacity=0.8).add_to(m)
         return m
     except: return None
 
-# --- 4. SESSION STATE & AUTH ---
+# --- 4. SESSION STATE & LOGIN ---
 if "strava_token" not in st.session_state: st.session_state.strava_token = None
 if "messages" not in st.session_state: st.session_state.messages = []
 if "user_data" not in st.session_state:
+    # Dati di default (verranno sovrascritti nel profilo)
     st.session_state.user_data = {"eta": 35, "peso": 75.0, "altezza": 180, "fc_min": 50, "fc_max": 190}
 
-# Gestione Token Strava (Anti-Loop)
+# Gestione Redirect Strava
 query_params = st.query_params
 if "code" in query_params and st.session_state.strava_token is None:
     code = query_params["code"]
@@ -96,7 +89,7 @@ if "code" in query_params and st.session_state.strava_token is None:
         st.query_params.clear()
         st.rerun()
 
-# --- 5. INTERFACCIA PRINCIPALE ---
+# --- 5. INTERFACCIA APP ---
 if st.session_state.strava_token:
     token = st.session_state.strava_token
     r = requests.get("https://www.strava.com/api/v3/athlete/activities?per_page=100", 
@@ -105,117 +98,97 @@ if st.session_state.strava_token:
     if r.status_code == 200:
         df = pd.DataFrame(r.json())
         df['start_date'] = pd.to_datetime(df['start_date_local']).dt.tz_localize(None)
+        
+        # Calcolo TSS e Carichi
         u = st.session_state.user_data
         df['tss'] = df.apply(lambda x: safe_calculate_tss(x, u['fc_min'], u['fc_max']), axis=1)
         df = df.sort_values('start_date')
-
-        # Calcoli Performance
+        
         daily_tss = df.groupby(df['start_date'].dt.date)['tss'].sum()
         all_dates = pd.date_range(start=df['start_date'].min().date(), end=datetime.now().date(), freq='D')
         daily_full = daily_tss.reindex(all_dates.date, fill_value=0)
         ctl = daily_full.ewm(span=42).mean()
         atl = daily_full.ewm(span=7).mean()
         tsb = ctl - atl
-        curr_acwr = atl.iloc[-1] / ctl.iloc[-1] if ctl.iloc[-1] > 0 else 0
 
-        # Sidebar Navigazione
+        # Sidebar
         with st.sidebar:
-            st.title("🏆 Elite AI")
-            model_choice = st.selectbox("Cervello AI", ["⚡ Gemini Flash", "🧠 Gemini Pro"])
-            target_model_name = '1.5-pro' if "Pro" in model_choice else '1.5-flash'
-            target_model = next((m for m in available_models if target_model_name in m), available_models[0])
-            model = genai.GenerativeModel(target_model)
-            
-            st.divider()
-            menu = st.radio("SISTEMA", ["DASHBOARD", "CALENDARIO", "CHAT COACH", "PROFILO & SETTINGS"])
-            if st.button("🚪 Logout"):
+            st.title("🏆 Elite AI Coach")
+            menu = st.radio("SISTEMA", ["DASHBOARD", "CALENDARIO", "AI CHAT", "PROFILO"])
+            if st.button("🚪 Esci"):
                 st.session_state.strava_token = None
                 st.rerun()
 
-        # --- A. PROFILO & SETTINGS ---
-        if menu == "PROFILO & SETTINGS":
-            st.title("👤 Impostazioni Atleta")
-            with st.form("profile_form"):
-                c1, c2 = st.columns(2)
-                with c1:
-                    u['eta'] = st.number_input("Età", value=u['eta'])
-                    u['peso'] = st.number_input("Peso (kg)", value=u['peso'])
-                    u['altezza'] = st.number_input("Altezza (cm)", value=u['altezza'])
-                with c2:
-                    u['fc_min'] = st.number_input("FC Riposo", value=u['fc_min'])
-                    u['fc_max'] = st.number_input("FC Massima", value=u['fc_max'])
-                if st.form_submit_button("Salva e Ricalcola"):
+        # --- SEZIONE PROFILO ---
+        if menu == "PROFILO":
+            st.header("👤 Profilo Atleta")
+            with st.form("profile_settings"):
+                u['eta'] = st.number_input("Età", value=u['eta'])
+                u['peso'] = st.number_input("Peso (kg)", value=float(u['peso']))
+                u['fc_min'] = st.number_input("FC Minima (Riposo)", value=u['fc_min'])
+                u['fc_max'] = st.number_input("FC Massima", value=u['fc_max'])
+                if st.form_submit_button("Salva Impostazioni"):
                     st.session_state.user_data = u
-                    st.success("Dati aggiornati!")
+                    st.success("Dati aggiornati e carichi ricalcolati!")
                     st.rerun()
 
-        # --- B. DASHBOARD ---
+        # --- SEZIONE DASHBOARD ---
         elif menu == "DASHBOARD":
-            st.title("📊 Performance Hub")
-            c1, c2, c3, c4 = st.columns(4)
+            st.header("📊 Performance Metrics")
+            c1, c2, c3 = st.columns(3)
             c1.metric("Fitness (CTL)", f"{ctl.iloc[-1]:.1f}")
             c2.metric("Fatica (ATL)", f"{atl.iloc[-1]:.1f}")
-            c3.metric("Fresco (TSB)", f"{tsb.iloc[-1]:.1f}")
-            c4.metric("ACWR", f"{curr_acwr:.2f}")
+            c3.metric("Forma (TSB)", f"{tsb.iloc[-1]:.1f}")
 
             st.area_chart(pd.DataFrame({'Fitness': ctl, 'Fatica': atl, 'Forma': tsb}))
 
             st.divider()
             last = df.iloc[-1]
-            st.subheader(f"🏁 Ultima Sessione: {last['name']}")
-            col_m, col_d = st.columns([2, 1])
-            with col_m:
-                m_last = draw_map(last.get('map', {}).get('summary_polyline'))
-                if m_last: st_folium(m_last, width=800, height=400, key="dashboard_map")
-            with col_d:
-                dist_km = last['distance'] / 1000
-                st.write(f"**Sport:** {last['type']}")
-                st.write(f"**Distanza:** {dist_km:.2f} km")
-                if last['type'] in ["Run", "TrailRun"]:
-                    st.write(f"**Passo:** {format_pace(last['moving_time']/dist_km)} min/km")
-                elif last['type'] == "Swim":
-                    st.write(f"**Passo:** {calculate_swimming_pace(last['moving_time'], last['distance'])} /100m")
-                
-                with st.expander("🤖 Analisi Coach", expanded=True):
-                    try:
-                        p = f"Atleta {u}. Sessione: {last['type']}, {dist_km:.1f}km. Commento tecnico."
-                        st.write(model.generate_content(p).text)
-                    except: st.write("Servizio AI momentaneamente saturo.")
-
-        # --- C. CALENDARIO ---
-        elif menu == "CALENDARIO":
-            from streamlit_calendar import calendar
-            st.title("📅 Diario Tecnico")
-            events = [{"title": f"{row['type']} ({row['tss']:.0f})", "start": row['start_date'].isoformat(), "id": str(row['id'])} for _, row in df.iterrows()]
-            res = calendar(events=events, options={"initialView": "dayGridMonth"}, key="cal_v13")
-            if res.get("eventClick"):
-                eid = int(res["eventClick"]["event"]["id"])
-                st.session_state.selected_activity = df[df['id'] == eid].iloc[0]
+            st.subheader(f"🏁 Ultima Attività: {last['name']}")
             
-            if "selected_activity" in st.session_state:
-                act = st.session_state.selected_activity
-                st.markdown(f"#### Analisi: {act['name']}")
-                m_sel = draw_map(act.get('map', {}).get('summary_polyline'))
-                if m_sel: st_folium(m_sel, width=1000, height=400, key=f"map_{act['id']}")
+            col_map, col_info = st.columns([2, 1])
+            with col_info:
+                dist_km = last['distance']/1000
+                st.write(f"**Tipo:** {last['type']}")
+                st.write(f"**Distanza:** {dist_km:.2f} km")
+                if last['type'] == 'Swim':
+                    st.write(f"**Passo:** {calculate_swimming_pace(last['moving_time'], last['distance'])} /100m")
+                else:
+                    st.write(f"**Passo:** {format_pace(last['moving_time']/dist_km)} /km")
+                
+                if st.button("🤖 Analisi AI"):
+                    prompt = f"Atleta {u}. Sessione: {last['type']}, {dist_km:.1f}km. Fornisci feedback tecnico."
+                    st.info(model.generate_content(prompt).text)
 
-        # --- D. CHAT COACH ---
-        elif menu == "CHAT COACH":
-            st.title("💬 AI Professional Coach")
-            if st.button("🗑️ Reset Chat"): st.session_state.messages = []; st.rerun()
+            with col_map:
+                m_last = draw_map(last.get('map', {}).get('summary_polyline'))
+                if m_last: st_folium(m_last, width=700, height=350, key="main_map")
+
+        # --- SEZIONE CALENDARIO ---
+        elif menu == "CALENDARIO":
+            st.header("📅 Diario Allenamenti")
+            events = [{"title": f"{row['type']} - TSS: {row['tss']:.0f}", "start": row['start_date'].isoformat()} for _, row in df.iterrows()]
+            calendar(events=events, options={"initialView": "dayGridMonth"})
+
+        # --- SEZIONE AI CHAT ---
+        elif menu == "AI CHAT":
+            st.header("💬 Chiedi al tuo Coach")
             for m in st.session_state.messages:
                 with st.chat_message(m["role"]): st.markdown(m["content"])
-            if prompt := st.chat_input("Chiedi un consiglio..."):
+            
+            if prompt := st.chat_input("Come dovrei allenarmi oggi?"):
                 st.session_state.messages.append({"role": "user", "content": prompt})
                 with st.chat_message("user"): st.markdown(prompt)
-                with st.chat_message("assistant"):
-                    ctx = f"Atleta: {u}. Carico: CTL {ctl.iloc[-1]:.1f}, TSB {tsb.iloc[-1]:.1f}."
-                    r = model.generate_content(ctx + "\n" + prompt).text
-                    st.markdown(r)
-                    st.session_state.messages.append({"role": "assistant", "content": r})
+                
+                context = f"Dati atleta: {u}. Fitness attuale (CTL): {ctl.iloc[-1]:.1f}. Forma (TSB): {tsb.iloc[-1]:.1f}."
+                response = model.generate_content(context + "\n" + prompt).text
+                
+                with st.chat_message("assistant"): st.markdown(response)
+                st.session_state.messages.append({"role": "assistant", "content": response})
 
-    else: st.error("Errore API Strava. Verifica le chiavi.")
+    else: st.error("Errore nel recupero dati da Strava.")
 else:
     st.title("🚀 Elite AI Performance Hub")
-    st.write("Analisi avanzata multisport potenziata da Google Gemini.")
+    st.write("Accedi per analizzare i tuoi dati Strava con l'intelligenza artificiale.")
     auth_url = f"https://www.strava.com/oauth/authorize?client_id={CLIENT_ID}&response_type=code&redirect_uri={REDIRECT_URI}&scope=read,activity:read_all&approval_prompt=force"
     st.link_button("🔥 Connetti il tuo Strava", auth_url)
