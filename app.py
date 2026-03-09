@@ -10,7 +10,8 @@ from streamlit_folium import st_folium
 from streamlit_calendar import calendar
 from datetime import datetime
 
-# --- 1. CONFIGURAZIONE CHIAVI ---
+# --- 1. CONFIGURAZIONE CHIAVI & URL ---
+# Assicurati che questo URL sia ESATTAMENTE quello registrato su Strava Dashboard
 REDIRECT_URI = "https://elite-ai-coach-4lm2ecs6qfslfkkzaeacrd.streamlit.app"
 
 def get_secret(key):
@@ -25,7 +26,7 @@ if GEMINI_KEY:
 
 st.set_page_config(page_title="Elite AI Coach", page_icon="🏃‍♂️", layout="wide")
 
-# --- 2. LOGICHE TECNICHE ---
+# --- 2. FUNZIONI TECNICHE ---
 def format_pace(seconds_per_km):
     if seconds_per_km <= 0 or pd.isna(seconds_per_km): return "0:00"
     return f"{int(seconds_per_km // 60)}:{int(seconds_per_km % 60):02d}"
@@ -46,7 +47,7 @@ if "messages" not in st.session_state: st.session_state.messages = []
 if "user_data" not in st.session_state:
     st.session_state.user_data = {"peso": 75.0, "fc_min": 50, "fc_max": 190}
 
-# OAuth Strava
+# Gestione OAuth Strava
 if "code" in st.query_params and st.session_state.strava_token is None:
     res = requests.post('https://www.strava.com/oauth/token', 
                         data={'client_id': CLIENT_ID, 'client_secret': CLIENT_SECRET, 
@@ -55,7 +56,7 @@ if "code" in st.query_params and st.session_state.strava_token is None:
         st.session_state.strava_token = res['access_token']
         st.rerun()
 
-# --- 4. INTERFACCIA PRINCIPALE ---
+# --- 4. LOGICA APPLICATIVA ---
 if st.session_state.strava_token:
     token = st.session_state.strava_token
     r = requests.get("https://www.strava.com/api/v3/athlete/activities?per_page=100", 
@@ -72,16 +73,18 @@ if st.session_state.strava_token:
         ctl = df['tss'].ewm(span=42).mean()
         tsb = ctl - df['tss'].ewm(span=7).mean()
 
-        # Ultima attività (Sempre disponibile)
+        # Variabili globali per la chat (Fix NameError)
         last_act = df.iloc[-1]
-        last_dist = last_act['distance'] / 1000
-        last_pace = format_pace(last_act['moving_time'] / last_dist)
+        dist_km = last_act['distance'] / 1000  # Usiamo dist_km per coerenza con l'errore visto
+        pace_str = format_pace(last_act['moving_time'] / dist_km)
 
         with st.sidebar:
             st.title("Elite Menu")
             menu = st.radio("VAI A:", ["DASHBOARD", "CALENDARIO", "AI COACH", "PROFILO"])
             st.divider()
-            ai_pref = st.selectbox("Modello Preferito:", ["gemini-2.0-flash", "gemini-1.5-pro"])
+            # Nomi modelli completi per evitare 404
+            ai_model_name = st.selectbox("Modello AI:", 
+                                       ["models/gemini-2.0-flash", "models/gemini-1.5-pro", "models/gemini-1.5-flash"])
             if st.button("Logout"):
                 st.session_state.strava_token = None
                 st.rerun()
@@ -91,42 +94,37 @@ if st.session_state.strava_token:
             c1, c2, c3 = st.columns(3)
             c1.metric("Fitness (CTL)", f"{ctl.iloc[-1]:.1f}")
             c2.metric("Forma (TSB)", f"{tsb.iloc[-1]:.1f}")
-            c3.metric("Ultima", f"{last_dist:.1f} km")
+            c3.metric("Ultima", f"{dist_km:.1f} km")
             st.area_chart(pd.DataFrame({'Fitness': ctl, 'Forma': tsb}))
-
-        elif menu == "CALENDARIO":
-            events = [{"title": f"{a['type']} ({a['distance']/1000:.1f}k)", "start": a['start_date_local']} for a in r.json()]
-            calendar(events=events)
 
         elif menu == "AI COACH":
             col_h, col_b = st.columns([3, 1])
             col_h.header("💬 Elite Coach")
-            if col_b.button("🗑️ Pulisci"):
+            if col_b.button("🗑️ Pulisci Chat"):
                 st.session_state.messages = []
                 st.rerun()
 
             for m in st.session_state.messages:
                 with st.chat_message(m["role"]): st.markdown(m["content"])
             
-            if prompt := st.chat_input("Analizziamo l'ultima sessione?"):
+            if prompt := st.chat_input("Come sto andando?"):
                 st.session_state.messages.append({"role": "user", "content": prompt})
                 with st.chat_message("user"): st.markdown(prompt)
                 
-                context = f"Atleta {u['peso']}kg. CTL {ctl.iloc[-1]:.1f}. Ultima corsa {last_dist:.2f}km a {last_pace}."
+                context = f"Atleta {u['peso']}kg. CTL {ctl.iloc[-1]:.1f}. Ultima corsa {dist_km:.2f}km a {pace_str}."
                 
-                # --- LOGICA DI FALLBACK ---
                 try:
-                    # Prova il modello scelto
-                    model = genai.GenerativeModel(ai_pref)
+                    # Chiamata al modello selezionato
+                    model = genai.GenerativeModel(ai_model_name)
                     response = model.generate_content(f"{context}\n\nDomanda: {prompt}").text
                 except Exception as e:
-                    if "429" in str(e) or "ResourceExhausted" in str(e):
-                        st.warning("Quota 2.0 esaurita. Uso Gemini 1.5 Flash come riserva...")
-                        # Fallback su 1.5 Flash (molta più quota)
-                        model_fb = genai.GenerativeModel("gemini-1.5-flash")
-                        response = model_fb.generate_content(f"{context}\n\nDomanda: {prompt}").text
-                    else:
-                        response = f"⚠️ Errore critico: {str(e)}"
+                    # Fallback robusto su 1.5 Flash in caso di quota esaurita o errore 404
+                    st.warning(f"Modello {ai_model_name} non disponibile o quota esaurita. Provo il recupero...")
+                    try:
+                        fallback_model = genai.GenerativeModel("models/gemini-1.5-flash")
+                        response = fallback_model.generate_content(f"{context}\n\nDomanda: {prompt}").text
+                    except Exception as e2:
+                        response = f"⚠️ Errore critico AI: {str(e2)}"
 
                 with st.chat_message("assistant"): st.markdown(response)
                 st.session_state.messages.append({"role": "assistant", "content": response})
@@ -139,8 +137,9 @@ if st.session_state.strava_token:
                 u['fc_max'] = st.number_input("FC Max", value=int(u['fc_max']))
                 if st.form_submit_button("Salva"):
                     st.session_state.user_data = u
-                    st.success("Salvato!")
+                    st.success("Dati aggiornati!")
 else:
     st.title("🚀 Elite AI Performance Hub")
+    # Nota: Assicurati che CLIENT_ID sia correttamente caricato dai secrets
     auth_url = f"https://www.strava.com/oauth/authorize?client_id={CLIENT_ID}&response_type=code&redirect_uri={REDIRECT_URI}&scope=read,activity:read_all&approval_prompt=force"
     st.link_button("🔥 Connetti Strava", auth_url)
