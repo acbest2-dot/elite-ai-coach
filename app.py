@@ -10,17 +10,13 @@ from streamlit_folium import st_folium
 from streamlit_calendar import calendar
 from datetime import datetime
 
-# --- 1. CONFIGURAZIONE CHIAVI & URL ---
+# --- 1. INIZIALIZZAZIONE & CHIAVI ---
 REDIRECT_URI = "https://elite-ai-coach-4lm2ecs6qfslfkkzaeacrd.streamlit.app"
 
-try:
-    CLIENT_ID = st.secrets["STRAVA_CLIENT_ID"]
-    CLIENT_SECRET = st.secrets["STRAVA_CLIENT_SECRET"]
-    GEMINI_KEY = st.secrets["GOOGLE_API_KEY"]
-except:
-    CLIENT_ID = os.getenv("STRAVA_CLIENT_ID")
-    CLIENT_SECRET = os.getenv("STRAVA_CLIENT_SECRET")
-    GEMINI_KEY = os.getenv("GOOGLE_API_KEY")
+# Inizializziamo le variabili per evitare NameError
+CLIENT_ID = st.secrets.get("STRAVA_CLIENT_ID") or os.getenv("STRAVA_CLIENT_ID")
+CLIENT_SECRET = st.secrets.get("STRAVA_CLIENT_SECRET") or os.getenv("STRAVA_CLIENT_SECRET")
+GEMINI_KEY = st.secrets.get("GOOGLE_API_KEY") or os.getenv("GOOGLE_API_KEY")
 
 if GEMINI_KEY:
     genai.configure(api_key=GEMINI_KEY)
@@ -53,34 +49,35 @@ def draw_map(encoded_polyline):
         return m
     except: return None
 
-# --- 3. SESSION STATE & LOGIN ---
+# --- 3. GESTIONE SESSIONE ---
 if "strava_token" not in st.session_state: st.session_state.strava_token = None
 if "messages" not in st.session_state: st.session_state.messages = []
 if "user_data" not in st.session_state:
     st.session_state.user_data = {"eta": 35, "peso": 75.0, "fc_min": 50, "fc_max": 190}
 
+# OAuth Strava
 query_params = st.query_params
 if "code" in query_params and st.session_state.strava_token is None:
-    code = query_params["code"]
     res = requests.post('https://www.strava.com/oauth/token', 
                         data={'client_id': CLIENT_ID, 'client_secret': CLIENT_SECRET, 
-                              'code': code, 'grant_type': 'authorization_code'}).json()
+                              'code': query_params["code"], 'grant_type': 'authorization_code'}).json()
     if 'access_token' in res:
         st.session_state.strava_token = res['access_token']
         st.query_params.clear()
         st.rerun()
 
-# --- 4. INTERFACCIA PRINCIPALE ---
+# --- 4. APP PRINCIPALE ---
 if st.session_state.strava_token:
     token = st.session_state.strava_token
     r = requests.get("https://www.strava.com/api/v3/athlete/activities?per_page=100", 
                      headers={'Authorization': f'Bearer {token}'})
     
     if r.status_code == 200:
-        df = pd.DataFrame(r.json())
+        activities = r.json()
+        df = pd.DataFrame(activities)
         df['start_date'] = pd.to_datetime(df['start_date_local']).dt.tz_localize(None)
         
-        # Calcolo Fitness (CTL/ATL/TSB)
+        # Calcoli Fitness
         u = st.session_state.user_data
         df['tss'] = df.apply(lambda x: safe_calculate_tss(x, u['fc_min'], u['fc_max']), axis=1)
         df = df.sort_values('start_date')
@@ -91,85 +88,75 @@ if st.session_state.strava_token:
         atl = daily_full.ewm(span=7).mean()
         tsb = ctl - atl
 
-        # Dati ultima attività pronti per tutte le sezioni
+        # Dati ultima attività (Sempre pronti per la chat)
         last_act = df.iloc[-1]
-        last_dist = last_act['distance']/1000
-        last_pace = format_pace(last_act['moving_time']/last_dist)
+        d_km = last_act['distance'] / 1000
+        p_min = format_pace(last_act['moving_time'] / d_km)
 
         with st.sidebar:
             st.title("Elite AI Settings")
-            menu = st.radio("VAI A:", ["DASHBOARD", "CALENDARIO", "AI COACH", "PROFILO"])
+            menu = st.radio("SEZIONE:", ["DASHBOARD", "CALENDARIO", "AI COACH", "PROFILO"])
             st.divider()
             ai_mode = st.radio("Cervello AI:", ["LIGHT", "PRO"])
-            if st.button("Logout"):
+            if st.button("Esci"):
                 st.session_state.strava_token = None
                 st.rerun()
 
-        # --- DASHBOARD ---
         if menu == "DASHBOARD":
-            st.header("📊 Performance & Carico")
+            st.header("📊 Performance")
             c1, c2, c3 = st.columns(3)
             c1.metric("Fitness (CTL)", f"{ctl.iloc[-1]:.1f}")
             c2.metric("Fatica (ATL)", f"{atl.iloc[-1]:.1f}")
             c3.metric("Forma (TSB)", f"{tsb.iloc[-1]:.1f}")
             st.area_chart(pd.DataFrame({'Fitness': ctl, 'Fatica': atl, 'Forma': tsb}))
             
-            st.divider()
-            st.subheader(f"🏁 Ultima Sessione: {last_act['name']}")
-            col1, col2 = st.columns([1, 2])
-            with col1:
-                st.metric("Distanza", f"{last_dist:.2f} km")
-                st.metric("Passo", last_pace)
-            with col2:
-                m = draw_map(last_act.get('map', {}).get('summary_polyline'))
-                if m: st_folium(m, width=700, height=350, key="dash_map")
+            st.subheader(f"🏁 {last_act['name']}")
+            m = draw_map(last_act.get('map', {}).get('summary_polyline'))
+            if m: st_folium(m, width=700, height=350, key="map")
 
-        # --- CALENDARIO ---
         elif menu == "CALENDARIO":
-            st.header("📅 Diario Allenamenti")
             events = [{"title": f"{a['type']} ({a['distance']/1000:.1f}k)", "start": a['start_date_local']} for a in activities]
             calendar(events=events)
 
-        # --- AI COACH CON PULSANTE CLEAR ---
         elif menu == "AI COACH":
-            col_head, col_clear = st.columns([3, 1])
-            with col_head:
-                st.header(f"💬 Coach AI ({ai_mode})")
-            with col_clear:
-                if st.button("🗑️ Pulisci Chat"):
+            head_col, clear_col = st.columns([3, 1])
+            with head_col: st.header(f"💬 Coach AI ({ai_mode})")
+            with clear_col:
+                if st.button("🗑️ Svuota Chat"):
                     st.session_state.messages = []
                     st.rerun()
 
             for m in st.session_state.messages:
                 with st.chat_message(m["role"]): st.markdown(m["content"])
             
-            if prompt := st.chat_input("Chiedi analisi o consigli..."):
+            if prompt := st.chat_input("Chiedi al coach..."):
                 st.session_state.messages.append({"role": "user", "content": prompt})
                 with st.chat_message("user"): st.markdown(prompt)
                 
-                context = f"Atleta {u['peso']}kg. Fitness {ctl.iloc[-1]:.1f}. Ultima corsa {last_dist:.1f}km."
-                m_name = 'gemini-1.5-flash' if ai_mode == "LIGHT" else 'gemini-1.5-pro'
+                # Context Robusto
+                context = f"Dati: {u['peso']}kg. Fitness: {ctl.iloc[-1]:.1f}. Ultima corsa: {d_km:.2f}km a {p_min}."
+                
+                # Nomi modelli aggiornati per evitare il 404
+                m_name = "gemini-1.5-flash-latest" if ai_mode == "LIGHT" else "gemini-1.5-pro-latest"
                 
                 try:
                     model = genai.GenerativeModel(m_name)
+                    # Forziamo l'uso del modello corretto senza prefisso "models/" manuale
                     response = model.generate_content(f"{context}\n\nDomanda: {prompt}").text
                 except Exception as e:
-                    response = f"⚠️ Errore AI: {str(e)}"
+                    response = f"⚠️ Errore AI: {str(e)}. Assicurati che la chiave sia valida."
 
                 with st.chat_message("assistant"): st.markdown(response)
                 st.session_state.messages.append({"role": "assistant", "content": response})
 
-        # --- PROFILO ---
         elif menu == "PROFILO":
-            st.header("👤 Impostazioni Atleta")
-            with st.form("p_form"):
+            st.header("👤 Profilo")
+            with st.form("p"):
                 u['peso'] = st.number_input("Peso (kg)", value=float(u['peso']))
-                u['fc_min'] = st.number_input("FC Riposo", value=int(u['fc_min']))
                 u['fc_max'] = st.number_input("FC Max", value=int(u['fc_max']))
-                if st.form_submit_button("Salva Profilo"):
+                if st.form_submit_button("Salva"):
                     st.session_state.user_data = u
-                    st.success("Profilo salvato!")
-
+                    st.success("Dati aggiornati!")
 else:
     st.title("🚀 Elite AI Performance Hub")
     auth_url = f"https://www.strava.com/oauth/authorize?client_id={CLIENT_ID}&response_type=code&redirect_uri={REDIRECT_URI}&scope=read,activity:read_all&approval_prompt=force"
