@@ -31,8 +31,9 @@ MAPBOX_DAILY_SOFT_CAP = 200      # Soglia soft giornaliera (50k/30gg ≈ 1666/gg
 MAPBOX_SESSION_CAP    = 200      # Max map load per sessione Streamlit
 
 # ── Inizializzazione AI — Grok (xAI) + Gemini (Google) ──
-_ai_client   = None
-_ai_sdk_mode = None   # "new" | "old" | "grok" | None
+_ai_client      = None   # client principale (2.0+)
+_ai_client_v1a  = None   # client v1alpha per modelli 1.5
+_ai_sdk_mode    = None   # "new" | "old" | "grok" | None
 
 # Grok via OpenAI-compatible endpoint — ha priorità se la key è presente
 if GROK_KEY:
@@ -47,9 +48,16 @@ if GROK_KEY:
 if _ai_sdk_mode is None and GEMINI_KEY:
     try:
         import google.genai as genai_new
-        _ai_client   = genai_new.Client(api_key=GEMINI_KEY)
+        from google.genai import types as genai_types
+        # Client principale: usa v1beta (default) — supporta 2.0+, 2.5, 3.x
+        _ai_client = genai_new.Client(api_key=GEMINI_KEY)
+        # Client secondario: usa v1alpha — supporta anche 1.5
+        _ai_client_v1a = genai_new.Client(
+            api_key=GEMINI_KEY,
+            http_options=genai_types.HttpOptions(api_version="v1alpha")
+        )
         _ai_sdk_mode = "new"
-    except ImportError:
+    except (ImportError, Exception):
         pass
     if _ai_sdk_mode is None:
         try:
@@ -64,21 +72,16 @@ if _ai_sdk_mode is None and GEMINI_KEY:
 def get_available_models(api_key: str) -> list[str]:
     """
     Scopre modelli disponibili. Per Grok usa lista statica aggiornata.
-    Per Gemini fa auto-discovery dalla API key.
+    Per Gemini fa auto-discovery + fallback statico completo.
     """
     # ── Grok (xAI) ──────────────────────────────────
     if _ai_sdk_mode == "grok":
         return [
-            "grok-3",
-            "grok-3-fast",
-            "grok-3-mini",
-            "grok-3-mini-fast",
-            "grok-2-1212",
-            "grok-2-vision-1212",
-            "grok-beta",
+            "grok-3", "grok-3-fast", "grok-3-mini", "grok-3-mini-fast",
+            "grok-2-1212", "grok-2-vision-1212", "grok-beta",
         ]
 
-    # ── Gemini ───────────────────────────────────────
+    # ── Gemini — auto-discovery ───────────────────────────────────────────────
     models_found = []
     if _ai_sdk_mode == "new":
         try:
@@ -88,6 +91,15 @@ def get_available_models(api_key: str) -> list[str]:
                     models_found.append(name)
         except Exception:
             pass
+        # Prova anche il client v1alpha per i modelli 1.5
+        if _ai_client_v1a is not None:
+            try:
+                for m in _ai_client_v1a.models.list():
+                    name = m.name.replace("models/", "")
+                    if "gemini" in name and "embedding" not in name and name not in models_found:
+                        models_found.append(name)
+            except Exception:
+                pass
     elif _ai_sdk_mode == "old":
         try:
             for m in _ai_client.list_models():
@@ -98,28 +110,27 @@ def get_available_models(api_key: str) -> list[str]:
         except Exception:
             pass
 
-    preferred = [
+    # Lista statica completa — ordine di preferenza (più capace/recente prima)
+    # I modelli 1.5 vengono serviti via _ai_client_v1a (v1alpha)
+    static_all = [
+        "gemini-3.1-flash-lite-preview",
         "gemini-2.5-pro-preview-03-25",
-        "gemini-2.0-flash", "gemini-2.0-flash-lite", "gemini-2.0-flash-exp",
-        "gemini-1.5-flash", "gemini-1.5-flash-8b", "gemini-1.5-pro",
-        "gemini-1.0-pro",
-    ]
-    ordered = [m for m in preferred if m in models_found]
-    ordered += [m for m in models_found if m not in ordered]
-    # Se auto-discovery non restituisce 1.5, aggiungilo comunque come opzione
-    # (la nuova SDK lo supporta, anche se non sempre nell'elenco)
-    static_fallbacks = [
-        "gemini-2.5-pro-preview-03-25",
+        "gemini-2.5-flash-preview",
         "gemini-2.0-flash",
         "gemini-2.0-flash-lite",
+        "gemini-2.0-flash-exp",
         "gemini-1.5-flash",
         "gemini-1.5-flash-8b",
         "gemini-1.5-pro",
     ]
-    for fb in static_fallbacks:
-        if fb not in ordered:
-            ordered.append(fb)
-    return ordered if ordered else static_fallbacks
+    # Costruisci lista: prima quelli trovati in ordine preferito, poi aggiungi statici mancanti
+    ordered = [m for m in static_all if m in models_found]
+    ordered += [m for m in models_found if m not in ordered and "gemini" in m]
+    # Aggiungi sempre la lista statica come fallback (così appaiono anche senza auto-discovery)
+    for m in static_all:
+        if m not in ordered:
+            ordered.append(m)
+    return ordered
 
 st.set_page_config(page_title="Elite AI Coach Pro", page_icon="🏆", layout="wide")
 
@@ -1632,12 +1643,12 @@ if token_ok:
                 )
                 return resp.choices[0].message.content
             elif _ai_sdk_mode == "new":
-                # La nuova SDK google-genai richiede "models/" come prefisso
-                # per i modelli 1.5 quando si usa v1beta endpoint
-                _model_id = sel_model
-                if not _model_id.startswith("models/"):
-                    _model_id = f"models/{_model_id}"
-                response = _ai_client.models.generate_content(
+                # Modelli 1.5 richiedono client v1alpha; 2.0+ usano il client standard
+                _is_15 = "1.5" in sel_model
+                _client_to_use = _ai_client_v1a if (_is_15 and _ai_client_v1a) else _ai_client
+                # Il nome modello non deve avere il prefisso models/ per la nuova SDK
+                _model_id = sel_model.replace("models/", "")
+                response = _client_to_use.models.generate_content(
                     model=_model_id,
                     contents=prompt,
                 )
