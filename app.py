@@ -25,6 +25,9 @@ CLIENT_ID     = get_secret("STRAVA_CLIENT_ID")
 CLIENT_SECRET = get_secret("STRAVA_CLIENT_SECRET")
 GEMINI_KEY    = get_secret("GOOGLE_API_KEY")
 MAPBOX_TOKEN  = get_secret("MAPBOX_TOKEN") or ""
+MAPBOX_MONTHLY_LIMIT  = 50_000   # Free tier ufficiale Mapbox GL JS
+MAPBOX_DAILY_SOFT_CAP = 200      # Soglia soft giornaliera (50k/30gg ≈ 1666/gg, usiamo 200 come extra-safe)
+MAPBOX_SESSION_CAP    = 20       # Max map load per sessione Streamlit
 
 # ── Inizializzazione AI — supporta sia google-genai (nuova) che google-generativeai (vecchia) ──
 _ai_client   = None
@@ -651,20 +654,28 @@ def calc_nutritional_window(df, days=7) -> list:
     cutoff  = df["start_date"].max() - timedelta(days=days)
     recent  = df[df["start_date"] >= cutoff].copy()
     recent  = recent.sort_values("start_date", ascending=False)
+    def _safe_float(val, default=0.0):
+        """Converte a float gestendo NaN, None e stringhe vuote."""
+        try:
+            v = float(val)
+            return v if np.isfinite(v) else default
+        except (TypeError, ValueError):
+            return default
+
     results = []
     for _, row in recent.iterrows():
-        kj   = float(row.get("kilojoules") or 0)
-        kcal = kj * 0.239 if kj > 0 else float(row.get("calories") or 0)
+        kj   = _safe_float(row.get("kilojoules"), 0.0)
+        kcal = kj * 0.239 if kj > 0 else _safe_float(row.get("calories"), 0.0)
         if kcal < 100:
             continue
-        hrs      = float(row.get("moving_time", 0)) / 3600
-        tss_val  = float(row.get("tss", 0))
-        elev     = float(row.get("total_elevation_gain", 0) or 0)
+        hrs      = _safe_float(row.get("moving_time"), 0.0) / 3600
+        tss_val  = _safe_float(row.get("tss"), 0.0)
+        elev     = _safe_float(row.get("total_elevation_gain"), 0.0)
         carb_r   = 0.60 if tss_val > 80 else 0.50 if tss_val > 40 else 0.40
         carbs_g  = round(kcal * carb_r / 4)
         prot_g   = max(20, round(kcal * 0.15 / 4))
         water_ml = round(hrs * 500 + elev * 1.5)
-        end_min  = int(row.get("moving_time", 0) / 60)
+        end_min  = int(_safe_float(row.get("moving_time"), 0.0) / 60)
         win_end  = row["start_date"] + timedelta(minutes=end_min + 45)
         results.append({
             "data": row["start_date"].strftime("%d/%m %H:%M"),
@@ -2875,9 +2886,77 @@ Rispondi in italiano, tono professionale ma diretto, massimo 300 parole."""
             3. Aggiungi `MAPBOX_TOKEN = "pk...."` nei **Secrets** di Streamlit Cloud
             4. Ricarica l'app
 
-            Il piano gratuito include 50.000 tile load/mese.
+            Il piano gratuito include 50.000 map load/mese.
             """)
             st.stop()
+
+        # ── Inizializza contatori uso Mapbox ──
+        today_str_mb = datetime.now().strftime("%Y-%m-%d")
+        if "mb_loads_session"  not in st.session_state:
+            st.session_state.mb_loads_session  = 0
+        if "mb_loads_daily"    not in st.session_state:
+            st.session_state.mb_loads_daily    = 0
+        if "mb_loads_daily_dt" not in st.session_state:
+            st.session_state.mb_loads_daily_dt = today_str_mb
+        if "mb_loads_monthly"  not in st.session_state:
+            st.session_state.mb_loads_monthly  = 0
+        if "mb_loads_month_dt" not in st.session_state:
+            st.session_state.mb_loads_month_dt = datetime.now().strftime("%Y-%m")
+
+        # Reset automatico contatore giornaliero
+        if st.session_state.mb_loads_daily_dt != today_str_mb:
+            st.session_state.mb_loads_daily    = 0
+            st.session_state.mb_loads_daily_dt = today_str_mb
+
+        # Reset automatico contatore mensile
+        if st.session_state.mb_loads_month_dt != datetime.now().strftime("%Y-%m"):
+            st.session_state.mb_loads_monthly  = 0
+            st.session_state.mb_loads_month_dt = datetime.now().strftime("%Y-%m")
+
+        # ── Helper render-safe ──
+        def mapbox_render_allowed() -> tuple[bool, str]:
+            """Controlla se è sicuro renderizzare una mappa Mapbox. Ritorna (ok, motivo)."""
+            if st.session_state.mb_loads_monthly >= MAPBOX_MONTHLY_LIMIT:
+                return False, f"🛑 Limite mensile raggiunto ({MAPBOX_MONTHLY_LIMIT:,} map load). Riprendi il mese prossimo."
+            if st.session_state.mb_loads_daily >= MAPBOX_DAILY_SOFT_CAP:
+                return False, f"⚠️ Soglia giornaliera di sicurezza raggiunta ({MAPBOX_DAILY_SOFT_CAP} map load). Riprendi domani o aumenta `MAPBOX_DAILY_SOFT_CAP`."
+            if st.session_state.mb_loads_session >= MAPBOX_SESSION_CAP:
+                return False, f"⚠️ Troppe mappe in questa sessione ({MAPBOX_SESSION_CAP}). Ricarica la pagina per resettare il contatore di sessione."
+            return True, ""
+
+        def mapbox_register_load():
+            """Incrementa tutti i contatori dopo un render."""
+            st.session_state.mb_loads_session  += 1
+            st.session_state.mb_loads_daily    += 1
+            st.session_state.mb_loads_monthly  += 1
+
+        # ── Widget contatori in sidebar ──
+        with st.sidebar:
+            monthly_pct = st.session_state.mb_loads_monthly / MAPBOX_MONTHLY_LIMIT * 100
+            daily_pct   = st.session_state.mb_loads_daily   / MAPBOX_DAILY_SOFT_CAP  * 100
+            bar_color_mb = "#4CAF50" if monthly_pct < 60 else "#FF9800" if monthly_pct < 85 else "#F44336"
+            st.markdown(f"""
+            <div style='background:rgba(255,255,255,0.04);border-radius:10px;padding:10px 14px;margin:4px 0'>
+                <div style='font-size:11px;color:#888;margin-bottom:4px'>🗺️ Mapbox GL JS — Free Tier</div>
+                <div style='display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px'>
+                    <span>Sessione</span>
+                    <b style='color:{bar_color_mb}'>{st.session_state.mb_loads_session}/{MAPBOX_SESSION_CAP}</b>
+                </div>
+                <div style='display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px'>
+                    <span>Oggi</span>
+                    <b style='color:{bar_color_mb}'>{st.session_state.mb_loads_daily}/{MAPBOX_DAILY_SOFT_CAP}</b>
+                </div>
+                <div style='display:flex;justify-content:space-between;font-size:12px;margin-bottom:2px'>
+                    <span>Mese</span>
+                    <b style='color:{bar_color_mb}'>{st.session_state.mb_loads_monthly:,}/{MAPBOX_MONTHLY_LIMIT:,}</b>
+                </div>
+                <div style='background:rgba(255,255,255,0.08);border-radius:4px;height:5px;margin-top:4px'>
+                    <div style='background:{bar_color_mb};width:{min(monthly_pct,100):.1f}%;height:5px;border-radius:4px'></div>
+                </div>
+            </div>""", unsafe_allow_html=True)
+            if st.button("🔄 Reset contatore sessione", key="mb_reset_session"):
+                st.session_state.mb_loads_session = 0
+                st.rerun()
 
         # ── Filtro attività con tracciato (solo quelle con polyline) ──
         df_with_map = df[df["map"].apply(
@@ -3213,7 +3292,12 @@ map.on('mouseleave', 'route-line', () => {{
 </html>"""
 
                     import streamlit.components.v1 as components
-                    components.html(html_map, height=600, scrolling=False)
+                    _mb_ok, _mb_reason = mapbox_render_allowed()
+                    if not _mb_ok:
+                        st.error(_mb_reason)
+                    else:
+                        components.html(html_map, height=600, scrolling=False)
+                        mapbox_register_load()
 
                     # Slope legend sotto mappa
                     if show_slope:
@@ -3362,7 +3446,12 @@ map.on('load', () => {{
 </script></body></html>"""
 
                         import streamlit.components.v1 as components
-                        components.html(html_compare, height=580, scrolling=False)
+                        _mb_ok2, _mb_reason2 = mapbox_render_allowed()
+                        if not _mb_ok2:
+                            st.error(_mb_reason2)
+                        else:
+                            components.html(html_compare, height=580, scrolling=False)
+                            mapbox_register_load()
 
         # ─────────────────────────────────────────────────────
         # TAB 3 — VALANGHE (SCIALPINISMO)
@@ -3561,7 +3650,12 @@ map.on('load', () => {{
 </script></body></html>"""
 
                     import streamlit.components.v1 as components
-                    components.html(html_avalanche, height=640, scrolling=False)
+                    _mb_ok3, _mb_reason3 = mapbox_render_allowed()
+                    if not _mb_ok3:
+                        st.error(_mb_reason3)
+                    else:
+                        components.html(html_avalanche, height=640, scrolling=False)
+                        mapbox_register_load()
 
                     st.caption("""
                     **Layer attivi:**
