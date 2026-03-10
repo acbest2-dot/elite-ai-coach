@@ -1746,7 +1746,7 @@ if token_ok:
         _df7   = df[df["start_date"] >= (_now - timedelta(days=7))]
 
         # VO2max stima
-        _vo2max, _ = estimate_vo2max(df)
+        _vo2max, _ = calc_vo2max_estimate(df)
 
         # EF trend (ultimi 14gg): avg pace o watt / HR
         _ef_vals = []
