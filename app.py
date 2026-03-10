@@ -99,12 +99,27 @@ def get_available_models(api_key: str) -> list[str]:
             pass
 
     preferred = [
+        "gemini-2.5-pro-preview-03-25",
         "gemini-2.0-flash", "gemini-2.0-flash-lite", "gemini-2.0-flash-exp",
         "gemini-1.5-flash", "gemini-1.5-flash-8b", "gemini-1.5-pro",
+        "gemini-1.0-pro",
     ]
     ordered = [m for m in preferred if m in models_found]
     ordered += [m for m in models_found if m not in ordered]
-    return ordered if ordered else ["gemini-2.0-flash", "gemini-1.5-flash"]
+    # Se auto-discovery non restituisce 1.5, aggiungilo comunque come opzione
+    # (la nuova SDK lo supporta, anche se non sempre nell'elenco)
+    static_fallbacks = [
+        "gemini-2.5-pro-preview-03-25",
+        "gemini-2.0-flash",
+        "gemini-2.0-flash-lite",
+        "gemini-1.5-flash",
+        "gemini-1.5-flash-8b",
+        "gemini-1.5-pro",
+    ]
+    for fb in static_fallbacks:
+        if fb not in ordered:
+            ordered.append(fb)
+    return ordered if ordered else static_fallbacks
 
 st.set_page_config(page_title="Elite AI Coach Pro", page_icon="🏆", layout="wide")
 
@@ -1889,32 +1904,32 @@ if token_ok:
                     dkm_col  = "#4CAF50" if delta_km_sp >= 0 else "#F44336"
                     dkm_str  = f"<span style='color:{dkm_col};font-size:11px'>{delta_km_sp:+.1f} km vs prec.</span>"
                     st.markdown(f"""
-                    <div style="background:{si['color']}10;border-left:3px solid {si['color']};
+                    <div style="background:{si['color']}18;border-left:4px solid {si['color']};
                                 border-radius:0 10px 10px 0;padding:10px 16px;margin:5px 0;
                                 display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px">
                         <div style="display:flex;align-items:center;gap:8px;min-width:160px">
                             <span style="font-size:22px">{si['icon']}</span>
                             <div>
                                 <div style="font-weight:700;color:{si['color']};font-size:14px">{si['label']}</div>
-                                <div style="font-size:11px;color:#888">{n_sess} {'sessione' if n_sess==1 else 'sessioni'}</div>
+                                <div style="font-size:11px;color:#444">{n_sess} {'sessione' if n_sess==1 else 'sessioni'}</div>
                             </div>
                         </div>
                         <div style="display:flex;gap:16px;flex-wrap:wrap">
                             <div style="text-align:center">
-                                <div style="font-size:16px;font-weight:700;color:#eee">{km:.1f}</div>
-                                <div style="font-size:10px;color:#888">km</div>
+                                <div style="font-size:16px;font-weight:700;color:#111">{km:.1f}</div>
+                                <div style="font-size:10px;color:#555">km</div>
                             </div>
                             <div style="text-align:center">
-                                <div style="font-size:16px;font-weight:700;color:#eee">{int(ore)}h {int((ore%1)*60)}m</div>
-                                <div style="font-size:10px;color:#888">durata</div>
+                                <div style="font-size:16px;font-weight:700;color:#111">{int(ore)}h {int((ore%1)*60)}m</div>
+                                <div style="font-size:10px;color:#555">durata</div>
                             </div>
                             <div style="text-align:center">
-                                <div style="font-size:16px;font-weight:700;color:#eee">{tss_sp:.0f}</div>
-                                <div style="font-size:10px;color:#888">TSS</div>
+                                <div style="font-size:16px;font-weight:700;color:#111">{tss_sp:.0f}</div>
+                                <div style="font-size:10px;color:#555">TSS</div>
                             </div>
                             <div style="text-align:center">
-                                <div style="font-size:16px;font-weight:700;color:#eee">{elev_sp:.0f}</div>
-                                <div style="font-size:10px;color:#888">↑ m</div>
+                                <div style="font-size:16px;font-weight:700;color:#111">{elev_sp:.0f}</div>
+                                <div style="font-size:10px;color:#555">↑ m</div>
                             </div>
                         </div>
                         <div>{dkm_str}</div>
@@ -4546,7 +4561,7 @@ map.on('draw.delete', updateStats);
                     _nav_label = str(st.session_state.cal_year)
                 else:
                     _nav_label = f"{_calmod.month_name[st.session_state.cal_month]} {st.session_state.cal_year}"
-                st.markdown(f"<div style='text-align:center;font-size:17px;font-weight:700;padding:7px'>{_nav_label}</div>",
+                st.markdown(f"<div style='text-align:center;font-size:17px;font-weight:700;color:#111;padding:7px'>{_nav_label}</div>",
                             unsafe_allow_html=True)
             with _nav3:
                 if st.button("▶", key="calnext", use_container_width=True):
@@ -4582,7 +4597,7 @@ map.on('draw.delete', updateStats);
                 _hcols = st.columns(7)
                 for _di, _dn in enumerate(_DAY_NAMES):
                     _hcols[_di].markdown(
-                        f"<div style='text-align:center;font-size:11px;color:#888;font-weight:600'>{_dn}</div>",
+                        f"<div style='text-align:center;font-size:11px;color:#444;font-weight:700'>{_dn}</div>",
                         unsafe_allow_html=True)
 
                 # Griglia settimane
@@ -4597,19 +4612,19 @@ map.on('draw.delete', updateStats);
                             _dacts   = acts_by_day.get(_ds)
                             _has_act = _dacts is not None and not _dacts.empty
 
-                            # Colore bordo/sfondo cella
+                            # Colore bordo/sfondo cella (light theme)
                             if _sel:
-                                _bg, _brd = "rgba(233,69,96,0.2)", "2px solid #e94560"
+                                _bg, _brd = "rgba(233,69,96,0.12)", "2px solid #e94560"
                             elif _is_tod:
-                                _bg, _brd = "rgba(33,150,243,0.12)", "1px solid #2196F366"
+                                _bg, _brd = "rgba(33,150,243,0.10)", "2px solid #2196F3"
                             elif not _in_m:
                                 _bg, _brd = "transparent", "1px solid transparent"
                             elif _has_act:
-                                _bg, _brd = "rgba(255,255,255,0.04)", "1px solid rgba(255,255,255,0.1)"
+                                _bg, _brd = "rgba(0,0,0,0.03)", "1px solid rgba(0,0,0,0.10)"
                             else:
-                                _bg, _brd = "rgba(255,255,255,0.01)", "1px solid rgba(255,255,255,0.04)"
+                                _bg, _brd = "rgba(0,0,0,0.01)", "1px solid rgba(0,0,0,0.05)"
 
-                            _num_col = "#e94560" if _is_tod else "#fff" if _in_m else "#444"
+                            _num_col = "#e94560" if _is_tod else "#111" if _in_m else "#bbb"
 
                             # Pallini sport
                             _dots = ""
@@ -4651,7 +4666,7 @@ map.on('draw.delete', updateStats);
                     for _mi, _mn in enumerate(range(_row_s+1, _row_s+4)):
                         with _mcols[_mi]:
                             st.markdown(
-                                f"<div style='font-size:13px;font-weight:700;color:#aaa;margin-bottom:4px'>"
+                                f"<div style='font-size:13px;font-weight:700;color:#333;margin-bottom:4px'>"
                                 f"{_cm.month_name[_mn]}</div>",
                                 unsafe_allow_html=True)
                             _yr_weeks = _cm.Calendar(firstweekday=0).monthdatescalendar(_y, _mn)
@@ -4685,7 +4700,7 @@ map.on('draw.delete', updateStats);
                                         else:
                                             st.markdown(
                                                 f'<div title="{_yds}" style="width:7px;height:7px;border-radius:50%;'
-                                                f'background:#1e1e2e;border:1px solid #333;margin:auto"></div>',
+                                                f'background:rgba(0,0,0,0.08);border:1px solid rgba(0,0,0,0.15);margin:auto"></div>',
                                                 unsafe_allow_html=True)
 
             st.divider()
@@ -4712,20 +4727,20 @@ map.on('draw.delete', updateStats);
                     _hr_str  = f"❤️ <b>{int(_hr_avg)} bpm</b>" if _hr_avg and pd.notna(_hr_avg) else ""
                     _elev_str = f"⛰️ <b>{int(_elev)} m</b>" if _elev > 0 else ""
                     _pills = "".join([
-                        f'<span style="background:rgba(255,255,255,0.07);border-radius:20px;padding:3px 12px;font-size:12px;margin:2px">📏 <b>{_dist_km:.1f} km</b></span>',
-                        f'<span style="background:rgba(255,255,255,0.07);border-radius:20px;padding:3px 12px;font-size:12px;margin:2px">⏱️ <b>{int(_hrs)}h {int((_hrs%1)*60)}m</b></span>',
-                        f'<span style="background:rgba(255,255,255,0.07);border-radius:20px;padding:3px 12px;font-size:12px;margin:2px">{_pace_str}</span>' if _pace_str else "",
-                        f'<span style="background:rgba(255,255,255,0.07);border-radius:20px;padding:3px 12px;font-size:12px;margin:2px">{_hr_str}</span>' if _hr_str else "",
-                        f'<span style="background:rgba(255,255,255,0.07);border-radius:20px;padding:3px 12px;font-size:12px;margin:2px">⚡ <b>{_tss_v:.0f} TSS</b></span>',
-                        f'<span style="background:rgba(255,255,255,0.07);border-radius:20px;padding:3px 12px;font-size:12px;margin:2px">{_elev_str}</span>' if _elev_str else "",
+                        f'<span style="background:rgba(0,0,0,0.06);border-radius:20px;padding:3px 12px;font-size:12px;margin:2px;color:#111">📏 <b>{_dist_km:.1f} km</b></span>',
+                        f'<span style="background:rgba(0,0,0,0.06);border-radius:20px;padding:3px 12px;font-size:12px;margin:2px;color:#111">⏱️ <b>{int(_hrs)}h {int((_hrs%1)*60)}m</b></span>',
+                        f'<span style="background:rgba(0,0,0,0.06);border-radius:20px;padding:3px 12px;font-size:12px;margin:2px;color:#111">{_pace_str}</span>' if _pace_str else "",
+                        f'<span style="background:rgba(0,0,0,0.06);border-radius:20px;padding:3px 12px;font-size:12px;margin:2px;color:#111">{_hr_str}</span>' if _hr_str else "",
+                        f'<span style="background:rgba(0,0,0,0.06);border-radius:20px;padding:3px 12px;font-size:12px;margin:2px;color:#111">⚡ <b>{_tss_v:.0f} TSS</b></span>',
+                        f'<span style="background:rgba(0,0,0,0.06);border-radius:20px;padding:3px 12px;font-size:12px;margin:2px;color:#111">{_elev_str}</span>' if _elev_str else "",
                     ])
                     st.markdown(
-                        f'<div style="background:rgba(255,255,255,0.04);border:1px solid {_asi["color"]}44;'
+                        f'<div style="background:{_asi["color"]}0a;border:1px solid {_asi["color"]}33;'
                         f'border-left:4px solid {_asi["color"]};border-radius:12px;padding:14px 18px;margin:6px 0">'
                         f'<div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">'
                         f'<span style="font-size:22px">{_asi["icon"]}</span>'
-                        f'<span style="font-size:16px;font-weight:700;color:#eee">{_name_a}</span>'
-                        f'<span style="font-size:12px;color:#888">{_ar["start_date"].strftime("%H:%M")}</span>'
+                        f'<span style="font-size:16px;font-weight:700;color:#111">{_name_a}</span>'
+                        f'<span style="font-size:12px;color:#555">{_ar["start_date"].strftime("%H:%M")}</span>'
                         f'</div><div style="display:flex;flex-wrap:wrap;gap:4px">{_pills}</div></div>',
                         unsafe_allow_html=True)
             elif _sel_day:
@@ -4748,8 +4763,8 @@ map.on('draw.delete', updateStats);
                     _top = _dact["type"].value_counts().index[0]
                     _clr = get_sport_info(_top)["color"]
                 else:
-                    _clr = "#1e1e2e"
-                _brd = "#333" if _clr == "#1e1e2e" else "transparent"
+                    _clr = "rgba(0,0,0,0.07)"
+                _brd = "rgba(0,0,0,0.12)"
                 _cw.append(f'<div title="{_dstr}" style="width:14px;height:14px;border-radius:3px;'
                            f'background:{_clr};border:1px solid {_brd}"></div>')
                 if _d.weekday() == 6:
@@ -4811,44 +4826,64 @@ map.on('draw.delete', updateStats);
             c6.metric("FC media",   f"{fc_med:.0f} bpm" if fc_med else "N/A")
             c7.metric("Calorie",    f"{calorie:.0f} kcal" if calorie else "N/A")
 
-        def sport_breakdown_chart(df_sub, height=200):
-            """Grafico a torta + barre per sport."""
+        def sport_breakdown_chart(df_sub, height=200, compare_df=None):
+            """Card lista per sport — stesso stile Dashboard."""
             if df_sub.empty:
                 st.info("Nessuna attività nel periodo selezionato.")
                 return
-            grp = df_sub.groupby("type").agg(
-                sessioni=("distance", "count"),
-                km=("distance", lambda x: x.sum()/1000),
-                ore=("moving_time", lambda x: x.sum()/3600),
-                tss=("tss", "sum"),
-            ).reset_index()
-            grp["label"] = grp["type"].apply(lambda x: f"{get_sport_info(x)['icon']} {get_sport_info(x)['label']}")
-            grp["color"] = grp["type"].apply(lambda x: get_sport_info(x)["color"])
-
-            col_pie, col_bar = st.columns(2)
-            with col_pie:
-                fig_p = go.Figure(go.Pie(
-                    labels=grp["label"], values=grp["ore"],
-                    marker_colors=grp["color"].tolist(),
-                    hole=0.5, textinfo="label+percent",
-                    textfont_size=12,
-                ))
-                fig_p.update_layout(paper_bgcolor="rgba(0,0,0,0)", height=height,
-                                     margin=dict(l=0,r=0,t=10,b=0), showlegend=False,
-                                     annotations=[dict(text="Ore", x=0.5, y=0.5,
-                                                        font_size=14, showarrow=False, font_color="#aaa")])
-                st.plotly_chart(fig_p, use_container_width=True)
-            with col_bar:
-                fig_b = go.Figure()
-                fig_b.add_trace(go.Bar(name="Km", x=grp["label"], y=grp["km"],
-                                        marker_color=grp["color"].tolist(), opacity=0.85,
-                                        text=grp["km"].round(1), textposition="outside"))
-                fig_b.update_layout(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-                                     height=height, margin=dict(l=0,r=0,t=20,b=0),
-                                     xaxis=dict(gridcolor="rgba(255,255,255,0.05)"),
-                                     yaxis=dict(gridcolor="rgba(255,255,255,0.05)", title="km"),
-                                     showlegend=False)
-                st.plotly_chart(fig_b, use_container_width=True)
+            for sp in df_sub["type"].value_counts().index:
+                si      = get_sport_info(sp)
+                sp_df   = df_sub[df_sub["type"] == sp]
+                n_s     = len(sp_df)
+                km_s    = sp_df["distance"].sum() / 1000
+                ore_s   = sp_df["moving_time"].sum() / 3600
+                tss_s   = sp_df["tss"].sum()
+                elev_s  = float(sp_df["total_elevation_gain"].sum() or 0)
+                hr_s    = sp_df["average_heartrate"].dropna()
+                fc_s    = f"{hr_s.mean():.0f}" if not hr_s.empty else "—"
+                # delta vs compare_df
+                dkm_html = ""
+                if compare_df is not None and not compare_df.empty:
+                    prev_sp = compare_df[compare_df["type"] == sp]
+                    prev_km = prev_sp["distance"].sum() / 1000
+                    dkm     = km_s - prev_km
+                    dcol    = "#2e7d32" if dkm >= 0 else "#c62828"
+                    dkm_html = f'<span style="font-size:11px;color:{dcol}">{dkm:+.1f} km vs prec.</span>'
+                st.markdown(f"""
+                <div style="background:{si['color']}14;border-left:4px solid {si['color']};
+                            border-radius:0 12px 12px 0;padding:12px 18px;margin:5px 0;
+                            display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px">
+                    <div style="display:flex;align-items:center;gap:10px;min-width:150px">
+                        <span style="font-size:24px">{si['icon']}</span>
+                        <div>
+                            <div style="font-weight:700;color:{si['color']};font-size:14px">{si['label']}</div>
+                            <div style="font-size:11px;color:#444">{n_s} {'sessione' if n_s==1 else 'sessioni'}</div>
+                        </div>
+                    </div>
+                    <div style="display:flex;gap:20px;flex-wrap:wrap;align-items:center">
+                        <div style="text-align:center">
+                            <div style="font-size:17px;font-weight:700;color:#111">{km_s:.1f}</div>
+                            <div style="font-size:10px;color:#555">km</div>
+                        </div>
+                        <div style="text-align:center">
+                            <div style="font-size:17px;font-weight:700;color:#111">{int(ore_s)}h {int((ore_s%1)*60)}m</div>
+                            <div style="font-size:10px;color:#555">durata</div>
+                        </div>
+                        <div style="text-align:center">
+                            <div style="font-size:17px;font-weight:700;color:#111">{tss_s:.0f}</div>
+                            <div style="font-size:10px;color:#555">TSS</div>
+                        </div>
+                        <div style="text-align:center">
+                            <div style="font-size:17px;font-weight:700;color:#111">{int(elev_s)}</div>
+                            <div style="font-size:10px;color:#555">↑ m</div>
+                        </div>
+                        <div style="text-align:center">
+                            <div style="font-size:17px;font-weight:700;color:#111">{fc_s}</div>
+                            <div style="font-size:10px;color:#555">FC avg</div>
+                        </div>
+                    </div>
+                    <div>{dkm_html}</div>
+                </div>""", unsafe_allow_html=True)
 
         def weekly_bars_chart(df_sub, n_weeks=12, height=220):
             """Barre volume settimanale con colori per sport."""
@@ -4932,7 +4967,7 @@ map.on('draw.delete', updateStats);
 
             if not df_week.empty:
                 st.markdown("##### Distribuzione sport")
-                sport_breakdown_chart(df_week, height=220)
+                sport_breakdown_chart(df_week, compare_df=df_prev_week)
 
                 # Progress bar verso obiettivo settimanale (km)
                 target_km = st.number_input("🎯 Obiettivo km settimana", value=50, min_value=0, step=5, key="target_km_w")
@@ -4990,7 +5025,7 @@ map.on('draw.delete', updateStats);
 
             if not df_month_r.empty:
                 st.markdown("##### Distribuzione sport")
-                sport_breakdown_chart(df_month_r, height=240)
+                sport_breakdown_chart(df_month_r, compare_df=df_month_py)
 
                 # Grafico giornaliero del mese
                 st.markdown("##### Volume giornaliero (km)")
@@ -5077,7 +5112,7 @@ map.on('draw.delete', updateStats);
 
             if not df_year_r.empty:
                 st.markdown("##### Distribuzione sport")
-                sport_breakdown_chart(df_year_r, height=260)
+                sport_breakdown_chart(df_year_r)
 
                 # Volume mensile per sport (barre stacked)
                 st.markdown("##### Volume mensile (km)")
