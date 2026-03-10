@@ -1575,8 +1575,7 @@ if token_ok:
             "💪 Stato Fisico",
             "🧬 Metriche Avanzate",
             "🗺️ Mappe 3D",
-            "📈 Recap",
-            "📅 Calendario",
+            "📅 Storico & Calendario",
             "💬 Coach Chat",
             "🏅 Record Personali",
             "👤 Profilo Fisico",
@@ -1737,36 +1736,118 @@ if token_ok:
                 </div>
             </div>""", unsafe_allow_html=True)
 
-        # ── KPI row ──
+        # ── PERFORMANCE HUB ──────────────────────────────────────────
+        st.markdown("### 🏆 Performance Hub — Stato Attuale")
+
+        # Calcoli Performance Hub (ultimi 21 giorni)
+        _now   = df["start_date"].max()
+        _df21  = df[df["start_date"] >= (_now - timedelta(days=21))]
+        _df14  = df[df["start_date"] >= (_now - timedelta(days=14))]
+        _df7   = df[df["start_date"] >= (_now - timedelta(days=7))]
+
+        # VO2max stima
+        _vo2max, _ = estimate_vo2max(df)
+
+        # EF trend (ultimi 14gg): avg pace o watt / HR
+        _ef_vals = []
+        for _, _r in _df14.iterrows():
+            _hr = _r.get("average_heartrate")
+            if not _hr or not pd.notna(_hr) or _hr <= 0: continue
+            if _r["type"] in ["Run","TrailRun"] and _r["distance"] > 0:
+                _pace_mpm = (_r["moving_time"]/60) / (_r["distance"]/1000)
+                _ef_vals.append(1 / (_pace_mpm * _hr / 100))   # higher = better
+            elif _r["type"] in ["Ride","VirtualRide","MountainBikeRide"]:
+                _w = _r.get("average_watts")
+                if _w and pd.notna(_w) and _w > 0:
+                    _ef_vals.append(_w / _hr)
+        _ef_avg = float(np.mean(_ef_vals)) if _ef_vals else None
+
+        # Monotonia (Banister)
+        _daily_tss = df.groupby(df["start_date"].dt.date)["tss"].sum()
+        _last7_tss = []
+        for _i in range(7):
+            _dd = (_now - timedelta(days=_i)).date()
+            _last7_tss.append(float(_daily_tss.get(_dd, 0)))
+        _mono_mean = np.mean(_last7_tss) if _last7_tss else 0
+        _mono_std  = np.std(_last7_tss)  if _last7_tss else 1
+        _monotonia = _mono_mean / _mono_std if _mono_std > 0 else 0
+        _strain    = _mono_mean * _mono_std * 7
+
+        # Consistenza 21gg
+        _active_21 = len(_df21["start_date"].dt.date.unique())
+        _consist_pct = _active_21 / 21 * 100
+
+        # Weekly load trend (ultimi 4 settimane)
+        _w_loads = []
+        for _wi in range(4):
+            _ws = _now - timedelta(days=7*(_wi+1))
+            _we = _now - timedelta(days=7*_wi)
+            _w_loads.append(float(df[(df["start_date"] >= _ws) & (df["start_date"] < _we)]["tss"].sum()))
+        _load_trend = _w_loads[0] - _w_loads[1] if len(_w_loads) >= 2 else 0
+
+        # Colori stato
+        _ctl_col = "#4CAF50" if current_ctl > 50 else "#FF9800" if current_ctl > 30 else "#888"
+        _tsb_col = "#4CAF50" if -10 <= current_tsb <= 20 else "#FF9800" if current_tsb > 20 else "#F44336"
+        _atl_col = "#FF9800" if current_atl > current_ctl * 1.3 else "#4CAF50"
+
+        # Riga 1: CTL / ATL / TSB / VO2max / FTP
+        ph1, ph2, ph3, ph4, ph5 = st.columns(5)
+        ph1.metric("🏋️ Fitness (CTL)", f"{current_ctl:.1f}",
+                   delta=f"{'↑' if _load_trend>0 else '↓'} {abs(_load_trend):.0f} TSS/sett",
+                   help="Chronic Training Load 42gg — la tua capacità di lavoro costruita")
+        ph2.metric("⚡ Fatica (ATL)", f"{current_atl:.1f}",
+                   help="Acute Training Load 7gg — stanchezza accumulata recente")
+        ph3.metric("✨ Forma (TSB)", f"{current_tsb:.1f}",
+                   delta=status_label, delta_color="off",
+                   help="Training Stress Balance — positivo=fresco, negativo=affaticato")
+        ph4.metric("🫁 VO2max stimato", f"{_vo2max:.1f} ml/kg/min" if _vo2max else "N/D",
+                   help="Stima da migliore performance in corsa (formula Daniels)")
+        ph5.metric("⚙️ FTP", f"{u['ftp']} W",
+                   help="Functional Threshold Power — impostato in Profilo Fisico")
+
+        # Riga 2: EF / Monotonia / Consistenza / Readiness / Budget TSS
+        ph6, ph7, ph8, ph9, ph10 = st.columns(5)
+        ph6.metric("📈 Efficienza (EF)", f"{_ef_avg:.3f}" if _ef_avg else "N/D",
+                   help="Watt/FC (bici) o 1/(passo×FC/100) (corsa) — ultimi 14gg. Più alto = meglio")
+        ph7.metric("🔄 Monotonia", f"{_monotonia:.2f}",
+                   delta="⚠️ alta" if _monotonia > 2.0 else "✅ ok",
+                   delta_color="off",
+                   help="TSS_medio / TSS_std ultimi 7gg. >2.0 = troppo uniforme, rischio overtraining")
+        ph8.metric("📅 Consistenza 21gg", f"{_consist_pct:.0f}%",
+                   delta=f"{_active_21}/21 giorni attivi",
+                   help="% giorni con almeno 1 attività negli ultimi 21 giorni")
         if rc_vitals is not None:
-            c1, c2, c3, c4, c5, c6 = st.columns(6)
-        else:
-            c1, c2, c3, c4, c5 = st.columns(5)
-            c6 = None
-        c1.metric("Fitness (CTL)", f"{current_ctl:.1f}", help="Chronic Training Load – carico cronico 42gg")
-        c2.metric("Forma (TSB)",   f"{current_tsb:.1f}", delta=status_label)
-        c3.metric("Fatica (ATL)",  f"{current_atl:.1f}", help="Acute Training Load – carico acuto 7gg")
-        c4.metric("Attività Totali", len(df))
-        c5.metric("Km Totali", f"{df['distance'].sum()/1000:.0f}")
-        if c6 is not None:
             rs = readiness
-            c6.metric("Readiness", f"{rs['score']}/100",
-                      delta=f"{rs['emoji']} {rs['label']}",
-                      help="Score recupero RingConn: HRV+Sonno+Forma+SpO2")
-        # Budget TSS
+            ph9.metric("💍 Readiness", f"{rs['score']}/100",
+                       delta=f"{rs['emoji']} {rs['label']}", delta_color="off")
+        else:
+            ph9.metric("💍 Readiness", "N/D", help="Carica i dati RingConn per abilitare")
+        if rc_vitals is not None or rc_sleep is not None:
+            b = tss_budget
+            ph10.metric("💰 TSS Budget oggi", f"{b['budget']}",
+                        delta=f"{b['zone']} · rem. {b['remaining']:.0f}", delta_color="off")
+        else:
+            _tss7_avg = _df7["tss"].sum() / 7
+            ph10.metric("📊 TSS medio/gg 7gg", f"{_tss7_avg:.0f}")
+
+        # Banner stato + budget (se RingConn)
         if rc_vitals is not None or rc_sleep is not None:
             b = tss_budget
             st.markdown(f"""
-            <div style="background:{b['color']}12;border:1px solid {b['color']}44;
-                        border-radius:10px;padding:10px 16px;margin:6px 0;display:flex;align-items:center;gap:16px">
-                <div style="text-align:center;min-width:60px">
-                    <div style="font-size:28px;font-weight:900;color:{b['color']}">{b['budget']}</div>
-                    <div style="font-size:10px;color:#888">TSS Budget</div>
+            <div style="background:{b['color']}10;border:1px solid {b['color']}33;
+                        border-radius:10px;padding:10px 18px;margin:8px 0;
+                        display:flex;align-items:center;gap:16px">
+                <div style="text-align:center;min-width:55px">
+                    <div style="font-size:26px;font-weight:900;color:{b['color']}">{b['budget']}</div>
+                    <div style="font-size:10px;color:#888">TSS budget</div>
                 </div>
-                <div>
+                <div style="flex:1">
                     <div style="font-size:13px;font-weight:700;color:{b['color']}">{b['zone']}</div>
                     <div style="font-size:11px;color:#aaa">{b['advice']}</div>
-                    <div style="font-size:11px;color:#666">Speso oggi: {b['tss_spent']:.0f} | Rimanente: {b['remaining']:.0f}</div>
+                </div>
+                <div style="font-size:12px;color:#666">
+                    Speso: <b style="color:#fff">{b['tss_spent']:.0f}</b> &nbsp;|&nbsp;
+                    Rimanente: <b style="color:{b['color']}">{b['remaining']:.0f}</b>
                 </div>
             </div>""", unsafe_allow_html=True)
 
@@ -1785,49 +1866,79 @@ if token_ok:
         avg_hr_7 = df7["average_heartrate"].dropna()
         r7c6.metric("FC media",    f"{avg_hr_7.mean():.0f} bpm" if not avg_hr_7.empty else "N/A")
 
-        # Barra sport della settimana
+        # Lista sport settimana + confronto settimana prec.
         if not df7.empty:
-            sport_7 = df7["type"].value_counts()
-            sport_labels = [f"{get_sport_info(s)['icon']} {get_sport_info(s)['label']}" for s in sport_7.index]
-            fig_7d = go.Figure()
-            for i, (sp, cnt) in enumerate(sport_7.items()):
-                si = get_sport_info(sp)
-                df7_sp = df7[df7["type"] == sp]
-                km = df7_sp["distance"].sum() / 1000
-                tss_sp = df7_sp["tss"].sum()
-                fig_7d.add_trace(go.Bar(
-                    name=f"{si['icon']} {si['label']}",
-                    x=[f"{si['icon']} {si['label']}"],
-                    y=[df7_sp["moving_time"].sum() / 3600],
-                    marker_color=si["color"],
-                    text=[f"{km:.1f}km<br>TSS {tss_sp:.0f}"],
-                    textposition="inside",
-                    insidetextanchor="middle",
-                ))
-            fig_7d.update_layout(
-                paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-                height=160, margin=dict(l=0, r=0, t=10, b=0),
-                showlegend=False, barmode="group",
-                xaxis=dict(gridcolor="rgba(255,255,255,0.05)"),
-                yaxis=dict(gridcolor="rgba(255,255,255,0.05)", title="ore"),
-            )
-            col_bar7, col_days7 = st.columns([2, 1])
-            with col_bar7:
-                st.plotly_chart(fig_7d, use_container_width=True)
+            df_prev7 = df[
+                (df["start_date"] >= (df["start_date"].max() - timedelta(days=14))) &
+                (df["start_date"] <  (df["start_date"].max() - timedelta(days=7)))
+            ]
+            col_sports7, col_days7 = st.columns([3, 1])
+            with col_sports7:
+                for sp in df7["type"].value_counts().index:
+                    si       = get_sport_info(sp)
+                    df7_sp   = df7[df7["type"] == sp]
+                    prev_sp  = df_prev7[df_prev7["type"] == sp]
+                    n_sess   = len(df7_sp)
+                    km       = df7_sp["distance"].sum() / 1000
+                    ore      = df7_sp["moving_time"].sum() / 3600
+                    tss_sp   = df7_sp["tss"].sum()
+                    elev_sp  = df7_sp["total_elevation_gain"].sum() or 0
+                    # delta km vs settimana prec.
+                    prev_km  = prev_sp["distance"].sum() / 1000 if not prev_sp.empty else 0
+                    delta_km_sp = km - prev_km
+                    dkm_col  = "#4CAF50" if delta_km_sp >= 0 else "#F44336"
+                    dkm_str  = f"<span style='color:{dkm_col};font-size:11px'>{delta_km_sp:+.1f} km vs prec.</span>"
+                    st.markdown(f"""
+                    <div style="background:{si['color']}10;border-left:3px solid {si['color']};
+                                border-radius:0 10px 10px 0;padding:10px 16px;margin:5px 0;
+                                display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px">
+                        <div style="display:flex;align-items:center;gap:8px;min-width:160px">
+                            <span style="font-size:22px">{si['icon']}</span>
+                            <div>
+                                <div style="font-weight:700;color:{si['color']};font-size:14px">{si['label']}</div>
+                                <div style="font-size:11px;color:#888">{n_sess} {'sessione' if n_sess==1 else 'sessioni'}</div>
+                            </div>
+                        </div>
+                        <div style="display:flex;gap:16px;flex-wrap:wrap">
+                            <div style="text-align:center">
+                                <div style="font-size:16px;font-weight:700;color:#eee">{km:.1f}</div>
+                                <div style="font-size:10px;color:#888">km</div>
+                            </div>
+                            <div style="text-align:center">
+                                <div style="font-size:16px;font-weight:700;color:#eee">{int(ore)}h {int((ore%1)*60)}m</div>
+                                <div style="font-size:10px;color:#888">durata</div>
+                            </div>
+                            <div style="text-align:center">
+                                <div style="font-size:16px;font-weight:700;color:#eee">{tss_sp:.0f}</div>
+                                <div style="font-size:10px;color:#888">TSS</div>
+                            </div>
+                            <div style="text-align:center">
+                                <div style="font-size:16px;font-weight:700;color:#eee">{elev_sp:.0f}</div>
+                                <div style="font-size:10px;color:#888">↑ m</div>
+                            </div>
+                        </div>
+                        <div>{dkm_str}</div>
+                    </div>""", unsafe_allow_html=True)
+
             with col_days7:
-                # Mini calendario settimanale
                 st.markdown("<div style='font-size:13px;color:#888;margin-bottom:6px'>Giorni attivi</div>", unsafe_allow_html=True)
                 today = datetime.now().date()
-                week_html = "<div style='display:flex;gap:6px;margin-top:4px'>"
+                week_html = "<div style='display:flex;gap:4px;flex-wrap:wrap'>"
                 giorni = ["L","M","M","G","V","S","D"]
                 for i in range(6, -1, -1):
                     d = today - timedelta(days=i)
-                    active = not df7[df7["start_date"].dt.date == d].empty
-                    bg = "#4CAF50" if active else "rgba(255,255,255,0.07)"
-                    border = "#4CAF50" if active else "rgba(255,255,255,0.1)"
+                    acts_d = df7[df7["start_date"].dt.date == d]
+                    active = not acts_d.empty
+                    if active:
+                        top_sp = acts_d["type"].value_counts().index[0]
+                        bg = get_sport_info(top_sp)["color"]
+                        brd = bg
+                    else:
+                        bg = "rgba(255,255,255,0.07)"
+                        brd = "rgba(255,255,255,0.1)"
                     week_html += (
-                        f"<div style='width:32px;height:32px;border-radius:8px;"
-                        f"background:{bg};border:1px solid {border};"
+                        f"<div style='width:30px;height:30px;border-radius:8px;"
+                        f"background:{bg};border:1px solid {brd};"
                         f"display:flex;align-items:center;justify-content:center;"
                         f"font-size:11px;color:{'#fff' if active else '#555'}'>"
                         f"{giorni[d.weekday()]}</div>"
@@ -1835,19 +1946,16 @@ if token_ok:
                 week_html += "</div>"
                 st.markdown(week_html, unsafe_allow_html=True)
 
-                # Confronto con settimana precedente
-                df_prev7 = df[
-                    (df["start_date"] >= (df["start_date"].max() - timedelta(days=14))) &
-                    (df["start_date"] <  (df["start_date"].max() - timedelta(days=7)))
-                ]
-                delta_km  = df7["distance"].sum()/1000 - df_prev7["distance"].sum()/1000
                 delta_tss = df7["tss"].sum() - df_prev7["tss"].sum()
-                st.markdown(f"<div style='font-size:12px;color:#888;margin-top:10px'>vs settimana prec.</div>", unsafe_allow_html=True)
-                km_color  = "#4CAF50" if delta_km  >= 0 else "#F44336"
+                delta_km_tot = df7["distance"].sum()/1000 - df_prev7["distance"].sum()/1000
                 tss_color = "#4CAF50" if delta_tss >= 0 else "#F44336"
+                km_color  = "#4CAF50" if delta_km_tot >= 0 else "#F44336"
                 st.markdown(
-                    f"<span style='color:{km_color};font-size:13px'>{delta_km:+.1f} km</span> &nbsp; "
-                    f"<span style='color:{tss_color};font-size:13px'>{delta_tss:+.0f} TSS</span>",
+                    f"<div style='font-size:11px;color:#888;margin-top:10px'>vs settimana prec.</div>"
+                    f"<div style='margin-top:4px'>"
+                    f"<span style='color:{km_color};font-size:13px'>{delta_km_tot:+.1f} km</span>&nbsp;&nbsp;"
+                    f"<span style='color:{tss_color};font-size:13px'>{delta_tss:+.0f} TSS</span>"
+                    f"</div>",
                     unsafe_allow_html=True
                 )
 
@@ -1861,7 +1969,6 @@ if token_ok:
             s   = get_sport_info(row["type"])
             m   = format_metrics(row)
             z_n, z_c, z_l = get_zone_for_activity(row, u["fc_max"])
-            is_last = (idx == 0)
 
             with st.container():
                 st.markdown(f"""
@@ -1891,39 +1998,37 @@ if token_ok:
                 </div>
                 """, unsafe_allow_html=True)
 
-            # Mappa per l'ultima attività
-            if is_last:
-                poly  = row.get("map", {})
-                poly  = poly.get("summary_polyline") if isinstance(poly, dict) else None
-                if poly:
-                    _mb_inline_ok, _ = mapbox_render_allowed()
-                    tab_2d, tab_3d = st.tabs(["🗺️ Mappa 2D", "🏔️ Mappa 3D"])
-                    with tab_2d:
-                        m_obj = draw_map(poly)
-                        if m_obj:
-                            col_m, col_info = st.columns([3, 1])
-                            with col_m:
-                                st_folium(m_obj, width=None, height=280, key=f"map_{idx}")
-                            with col_info:
-                                st.markdown(f"**Sport:** {s['label']}")
-                                st.markdown(f"**Data:** {row['start_date'].strftime('%d %b %Y')}")
-                                st.markdown(f"**Zona dominante:** {z_l}")
-                                pct_fc = (row.get('average_heartrate', 0) or 0) / u['fc_max'] * 100
-                                st.markdown(f"**%FC Max:** {pct_fc:.0f}%")
-                    with tab_3d:
-                        if not MAPBOX_TOKEN:
-                            st.info("Configura MAPBOX_TOKEN nei Secrets per abilitare la mappa 3D.")
-                        elif not _mb_inline_ok:
-                            st.warning("Limite Mapbox raggiunto per questa sessione.")
-                        else:
-                            _elev_g = float(row.get("total_elevation_gain") or 0)
-                            _html3d = build_inline_map3d(poly, MAPBOX_TOKEN,
-                                        sport_type=row.get("type",""),
-                                        elev_gain=_elev_g, height=360)
-                            if _html3d:
-                                import streamlit.components.v1 as components
-                                components.html(_html3d, height=370, scrolling=False)
-                                mapbox_register_load()
+            # Mappa per tutte e 3 le attività
+            _poly = row.get("map", {})
+            _poly = _poly.get("summary_polyline") if isinstance(_poly, dict) else None
+            if _poly:
+                _mb_ok, _ = mapbox_render_allowed()
+                _tab2d, _tab3d = st.tabs(["🗺️ Mappa 2D", "🏔️ Mappa 3D"])
+                with _tab2d:
+                    _mobj = draw_map(_poly)
+                    if _mobj:
+                        _mc, _minfo = st.columns([3, 1])
+                        with _mc:
+                            st_folium(_mobj, width=None, height=260, key=f"map_{idx}")
+                        with _minfo:
+                            st.markdown(f"**Sport:** {s['label']}")
+                            st.markdown(f"**Data:** {row['start_date'].strftime('%d %b')}")
+                            st.markdown(f"**Zona:** {z_l}")
+                            _pct = (row.get('average_heartrate',0) or 0) / u['fc_max'] * 100
+                            st.markdown(f"**%FC:** {_pct:.0f}%")
+                with _tab3d:
+                    if not MAPBOX_TOKEN:
+                        st.info("Configura MAPBOX_TOKEN per la mappa 3D.")
+                    elif not _mb_ok:
+                        st.warning("Limite Mapbox raggiunto.")
+                    else:
+                        _eg = float(row.get("total_elevation_gain") or 0)
+                        _h3d = build_inline_map3d(_poly, MAPBOX_TOKEN,
+                                  sport_type=row.get("type",""), elev_gain=_eg, height=340)
+                        if _h3d:
+                            import streamlit.components.v1 as components
+                            components.html(_h3d, height=350, scrolling=False)
+                            mapbox_register_load()
 
         # --- AI Analisi ultima attività ---
         st.divider()
@@ -4331,8 +4436,8 @@ map.on('draw.delete', updateStats);
             > ⚠️ Il percorso disegnato non viene salvato tra sessioni. Per salvarlo, usa il tasto 🗑️ per cancellarlo e disegnarne uno nuovo, oppure annota le coordinate manualmente.
             """)
 
-    elif menu == "📈 Recap":
-        st.markdown("## 📈 Recap Allenamenti")
+    elif menu == "📅 Storico & Calendario":
+        st.markdown("## 📅 Storico & Calendario")
 
         # ── Filtro sport ──
         all_sports_recap = sorted(df["type"].unique().tolist())
@@ -4369,9 +4474,319 @@ map.on('draw.delete', updateStats);
         st.divider()
 
         # ── Selezione periodo ──
-        tab_week, tab_month, tab_year, tab_yoy = st.tabs([
-            "📅 Settimana", "🗓️ Mese", "📆 Anno", "↔️ Anno su Anno"
+        tab_cal_main, tab_week, tab_month, tab_year, tab_yoy = st.tabs([
+            "📅 Calendario", "📊 Settimana", "🗓️ Mese", "📆 Anno", "↔️ Anno su Anno"
         ])
+
+        with tab_cal_main:
+            st.markdown("#### 📅 Calendario Allenamenti")
+
+            # ── State ──
+            for _k, _v in [("cal_selected_day", None), ("cal_view", "Mese"),
+                            ("cal_month", datetime.now().month), ("cal_year", datetime.now().year)]:
+                if _k not in st.session_state:
+                    st.session_state[_k] = _v
+
+            # ── Filtri sport ──
+            all_sports = sorted(df["type"].unique().tolist())
+            if st.session_state.sport_filter is None:
+                st.session_state.sport_filter = set(all_sports)
+
+            st.markdown("**Filtra per sport:**")
+            _sport_cols = st.columns(min(len(all_sports) + 2, 10))
+            for _si, _sp in enumerate(all_sports):
+                _sinfo = get_sport_info(_sp)
+                with _sport_cols[_si % (len(_sport_cols))]:
+                    if st.button(f"{_sinfo['icon']} {_sinfo['label']}", key=f"calsport_{_sp}",
+                                 type="primary" if _sp in st.session_state.sport_filter else "secondary",
+                                 use_container_width=True):
+                        _sf = st.session_state.sport_filter
+                        if _sp in _sf: _sf.discard(_sp)
+                        else:          _sf.add(_sp)
+                        st.rerun()
+            _ca, _cn, _ = st.columns([1, 1, 6])
+            with _ca:
+                if st.button("✅ Tutti",   key="calall",  use_container_width=True):
+                    st.session_state.sport_filter = set(all_sports); st.rerun()
+            with _cn:
+                if st.button("❌ Nessuno", key="calnone", use_container_width=True):
+                    st.session_state.sport_filter = set(); st.rerun()
+
+            df_cal = df[df["type"].isin(st.session_state.sport_filter)].copy()
+            df_cal["_ds"] = df_cal["start_date"].dt.strftime("%Y-%m-%d")
+            acts_by_day = {ds: grp for ds, grp in df_cal.groupby("_ds")}
+
+            st.divider()
+
+            # ── Vista switcher + navigazione ──
+            _vc1, _vc2, _vc3, _nav1, _nav2, _nav3 = st.columns([1,1,1,1,2,1])
+            for _col, _lbl, _view in [(_vc1,"📅 Settimana","Settimana"),
+                                       (_vc2,"🗓️ Mese","Mese"),
+                                       (_vc3,"📆 Anno","Anno")]:
+                with _col:
+                    if st.button(_lbl, key=f"calview_{_view}",
+                                 type="primary" if st.session_state.cal_view == _view else "secondary",
+                                 use_container_width=True):
+                        st.session_state.cal_view = _view
+                        st.session_state.cal_selected_day = None
+                        st.rerun()
+
+            with _nav1:
+                if st.button("◀", key="calprev", use_container_width=True):
+                    if st.session_state.cal_view == "Anno":
+                        st.session_state.cal_year -= 1
+                    elif st.session_state.cal_month == 1:
+                        st.session_state.cal_month = 12; st.session_state.cal_year -= 1
+                    else:
+                        st.session_state.cal_month -= 1
+                    st.session_state.cal_selected_day = None; st.rerun()
+            with _nav2:
+                import calendar as _calmod
+                if st.session_state.cal_view == "Anno":
+                    _nav_label = str(st.session_state.cal_year)
+                else:
+                    _nav_label = f"{_calmod.month_name[st.session_state.cal_month]} {st.session_state.cal_year}"
+                st.markdown(f"<div style='text-align:center;font-size:17px;font-weight:700;padding:7px'>{_nav_label}</div>",
+                            unsafe_allow_html=True)
+            with _nav3:
+                if st.button("▶", key="calnext", use_container_width=True):
+                    if st.session_state.cal_view == "Anno":
+                        st.session_state.cal_year += 1
+                    elif st.session_state.cal_month == 12:
+                        st.session_state.cal_month = 1; st.session_state.cal_year += 1
+                    else:
+                        st.session_state.cal_month += 1
+                    st.session_state.cal_selected_day = None; st.rerun()
+
+            st.divider()
+
+            import calendar as _cm
+
+            # ════════════════════════════════════
+            # VISTA MESE e SETTIMANA
+            # ════════════════════════════════════
+            if st.session_state.cal_view in ("Mese", "Settimana"):
+                _y = st.session_state.cal_year
+                _m = st.session_state.cal_month
+
+                if st.session_state.cal_view == "Settimana":
+                    _td  = datetime.now().date()
+                    _ws  = _td - timedelta(days=_td.weekday())
+                    _weeks = [[_ws + timedelta(days=i) for i in range(7)]]
+                    _y, _m = _td.year, _td.month
+                else:
+                    _weeks = _cm.Calendar(firstweekday=0).monthdatescalendar(_y, _m)
+
+                # Header giorni
+                _DAY_NAMES = ["Lun","Mar","Mer","Gio","Ven","Sab","Dom"]
+                _hcols = st.columns(7)
+                for _di, _dn in enumerate(_DAY_NAMES):
+                    _hcols[_di].markdown(
+                        f"<div style='text-align:center;font-size:11px;color:#888;font-weight:600'>{_dn}</div>",
+                        unsafe_allow_html=True)
+
+                # Griglia settimane
+                for _week in _weeks:
+                    _wcols = st.columns(7)
+                    for _ci, _day in enumerate(_week):
+                        with _wcols[_ci]:
+                            _ds      = _day.strftime("%Y-%m-%d")
+                            _in_m    = (_day.month == _m)
+                            _is_tod  = (_day == datetime.now().date())
+                            _sel     = (st.session_state.cal_selected_day == _ds)
+                            _dacts   = acts_by_day.get(_ds)
+                            _has_act = _dacts is not None and not _dacts.empty
+
+                            # Colore bordo/sfondo cella
+                            if _sel:
+                                _bg, _brd = "rgba(233,69,96,0.2)", "2px solid #e94560"
+                            elif _is_tod:
+                                _bg, _brd = "rgba(33,150,243,0.12)", "1px solid #2196F366"
+                            elif not _in_m:
+                                _bg, _brd = "transparent", "1px solid transparent"
+                            elif _has_act:
+                                _bg, _brd = "rgba(255,255,255,0.04)", "1px solid rgba(255,255,255,0.1)"
+                            else:
+                                _bg, _brd = "rgba(255,255,255,0.01)", "1px solid rgba(255,255,255,0.04)"
+
+                            _num_col = "#e94560" if _is_tod else "#fff" if _in_m else "#444"
+
+                            # Pallini sport
+                            _dots = ""
+                            if _has_act:
+                                for _, _ar in _dacts.head(4).iterrows():
+                                    _asi  = get_sport_info(_ar["type"])
+                                    _tss  = float(_ar.get("tss") or 0)
+                                    _sz   = max(7, min(15, int(_tss/7) + 7))
+                                    _title = f"{_asi['label']} {_ar['distance']/1000:.1f}km TSS:{_tss:.0f}"
+                                    _dots += (f'<div title="{_title}" style="width:{_sz}px;height:{_sz}px;'
+                                              f'border-radius:50%;background:{_asi["color"]};display:inline-block;margin:1px"></div>')
+                                if len(_dacts) > 4:
+                                    _dots += f'<span style="font-size:9px;color:#888">+{len(_dacts)-4}</span>'
+
+                            st.markdown(
+                                f'<div style="background:{_bg};border:{_brd};border-radius:10px;'
+                                f'padding:5px 3px 4px;min-height:56px;text-align:center;pointer-events:none">'
+                                f'<div style="font-size:12px;font-weight:700;color:{_num_col}">{_day.day if _in_m else ""}</div>'
+                                f'<div style="display:flex;flex-wrap:wrap;justify-content:center;gap:1px;margin-top:3px">{_dots}</div>'
+                                f'</div>',
+                                unsafe_allow_html=True)
+
+                            # Bottone click — solo sui giorni con attività
+                            if _has_act and _in_m:
+                                _btn_lbl = f"{'●' if not _sel else '○'}"
+                                if st.button(_btn_lbl, key=f"cd_{_ds}",
+                                             help=f"{len(_dacts)} {'attività' if len(_dacts)>1 else 'attività'} — clicca per dettaglio",
+                                             use_container_width=True):
+                                    st.session_state.cal_selected_day = None if _sel else _ds
+                                    st.rerun()
+
+            # ════════════════════════════════════
+            # VISTA ANNO
+            # ════════════════════════════════════
+            elif st.session_state.cal_view == "Anno":
+                _y = st.session_state.cal_year
+                for _row_s in range(0, 12, 3):
+                    _mcols = st.columns(3)
+                    for _mi, _mn in enumerate(range(_row_s+1, _row_s+4)):
+                        with _mcols[_mi]:
+                            st.markdown(
+                                f"<div style='font-size:13px;font-weight:700;color:#aaa;margin-bottom:4px'>"
+                                f"{_cm.month_name[_mn]}</div>",
+                                unsafe_allow_html=True)
+                            _yr_weeks = _cm.Calendar(firstweekday=0).monthdatescalendar(_y, _mn)
+                            for _yw in _yr_weeks:
+                                _yc = st.columns(7)
+                                for _yci, _yd in enumerate(_yw):
+                                    with _yc[_yci]:
+                                        if _yd.month != _mn:
+                                            st.markdown('<div style="height:16px"></div>', unsafe_allow_html=True)
+                                            continue
+                                        _yds   = _yd.strftime("%Y-%m-%d")
+                                        _ydact = acts_by_day.get(_yds)
+                                        _yhas  = _ydact is not None and not _ydact.empty
+                                        _ysel  = (st.session_state.cal_selected_day == _yds)
+                                        if _yhas:
+                                            _ysp   = _ydact["type"].value_counts().index[0]
+                                            _ysi   = get_sport_info(_ysp)
+                                            _ysz   = 11 if len(_ydact) > 1 else 9
+                                            _ybrd  = "2px solid #e94560" if _ysel else "none"
+                                            st.markdown(
+                                                f'<div title="{_yds}: {len(_ydact)} att." style="width:{_ysz}px;height:{_ysz}px;'
+                                                f'border-radius:50%;background:{_ysi["color"]};border:{_ybrd};margin:auto;cursor:pointer"></div>',
+                                                unsafe_allow_html=True)
+                                            if st.button("·", key=f"yrd_{_yds}",
+                                                         help=f"{len(_ydact)} att. — click per dettaglio"):
+                                                st.session_state.cal_selected_day = _yds
+                                                st.session_state.cal_view  = "Mese"
+                                                st.session_state.cal_month = _yd.month
+                                                st.session_state.cal_year  = _yd.year
+                                                st.rerun()
+                                        else:
+                                            st.markdown(
+                                                f'<div title="{_yds}" style="width:7px;height:7px;border-radius:50%;'
+                                                f'background:#1e1e2e;border:1px solid #333;margin:auto"></div>',
+                                                unsafe_allow_html=True)
+
+            st.divider()
+
+            # ════════════════════════════════════
+            # DETTAGLIO GIORNO SELEZIONATO
+            # ════════════════════════════════════
+            _sel_day = st.session_state.cal_selected_day
+            if _sel_day and _sel_day in acts_by_day:
+                _sel_acts = acts_by_day[_sel_day]
+                st.markdown(f"### 📋 {_sel_day} — {len(_sel_acts)} attività")
+                for _, _ar in _sel_acts.iterrows():
+                    _asi     = get_sport_info(_ar["type"])
+                    _dist_km = _ar["distance"] / 1000
+                    _hrs     = _ar["moving_time"] / 3600
+                    _tss_v   = float(_ar.get("tss") or 0)
+                    _elev    = float(_ar.get("total_elevation_gain") or 0)
+                    _hr_avg  = _ar.get("average_heartrate")
+                    _name_a  = _ar.get("name") or _ar["type"]
+                    _pace_str = ""
+                    if _ar["type"] in ["Run","TrailRun","VirtualRun"] and _dist_km > 0:
+                        _ps = _ar["moving_time"] / _dist_km
+                        _pace_str = f"🏃 <b>{int(_ps//60)}:{int(_ps%60):02d} /km</b>"
+                    _hr_str  = f"❤️ <b>{int(_hr_avg)} bpm</b>" if _hr_avg and pd.notna(_hr_avg) else ""
+                    _elev_str = f"⛰️ <b>{int(_elev)} m</b>" if _elev > 0 else ""
+                    _pills = "".join([
+                        f'<span style="background:rgba(255,255,255,0.07);border-radius:20px;padding:3px 12px;font-size:12px;margin:2px">📏 <b>{_dist_km:.1f} km</b></span>',
+                        f'<span style="background:rgba(255,255,255,0.07);border-radius:20px;padding:3px 12px;font-size:12px;margin:2px">⏱️ <b>{int(_hrs)}h {int((_hrs%1)*60)}m</b></span>',
+                        f'<span style="background:rgba(255,255,255,0.07);border-radius:20px;padding:3px 12px;font-size:12px;margin:2px">{_pace_str}</span>' if _pace_str else "",
+                        f'<span style="background:rgba(255,255,255,0.07);border-radius:20px;padding:3px 12px;font-size:12px;margin:2px">{_hr_str}</span>' if _hr_str else "",
+                        f'<span style="background:rgba(255,255,255,0.07);border-radius:20px;padding:3px 12px;font-size:12px;margin:2px">⚡ <b>{_tss_v:.0f} TSS</b></span>',
+                        f'<span style="background:rgba(255,255,255,0.07);border-radius:20px;padding:3px 12px;font-size:12px;margin:2px">{_elev_str}</span>' if _elev_str else "",
+                    ])
+                    st.markdown(
+                        f'<div style="background:rgba(255,255,255,0.04);border:1px solid {_asi["color"]}44;'
+                        f'border-left:4px solid {_asi["color"]};border-radius:12px;padding:14px 18px;margin:6px 0">'
+                        f'<div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">'
+                        f'<span style="font-size:22px">{_asi["icon"]}</span>'
+                        f'<span style="font-size:16px;font-weight:700;color:#eee">{_name_a}</span>'
+                        f'<span style="font-size:12px;color:#888">{_ar["start_date"].strftime("%H:%M")}</span>'
+                        f'</div><div style="display:flex;flex-wrap:wrap;gap:4px">{_pills}</div></div>',
+                        unsafe_allow_html=True)
+            elif _sel_day:
+                st.info(f"Nessuna attività il {_sel_day} (controlla i filtri sport).")
+
+            st.divider()
+
+            # ── Heatmap consistenza annuale ──
+            st.markdown("#### 🟩 Consistenza Annuale")
+            _today   = datetime.now().date()
+            _ys      = _today.replace(month=1, day=1)
+            _wks     = []
+            _cw      = []
+            _d       = _ys
+            _act_set = set(acts_by_day.keys())
+            while _d <= _today:
+                _dstr = _d.strftime("%Y-%m-%d")
+                _dact = acts_by_day.get(_dstr)
+                if _dact is not None and not _dact.empty:
+                    _top = _dact["type"].value_counts().index[0]
+                    _clr = get_sport_info(_top)["color"]
+                else:
+                    _clr = "#1e1e2e"
+                _brd = "#333" if _clr == "#1e1e2e" else "transparent"
+                _cw.append(f'<div title="{_dstr}" style="width:14px;height:14px;border-radius:3px;'
+                           f'background:{_clr};border:1px solid {_brd}"></div>')
+                if _d.weekday() == 6:
+                    _wks.append("".join(_cw)); _cw = []
+                _d += timedelta(days=1)
+            if _cw:
+                _wks.append("".join(_cw))
+
+            _heat = '<div style="display:flex;gap:3px">'
+            for _w in _wks:
+                _heat += f'<div style="display:flex;flex-direction:column;gap:2px">{_w}</div>'
+            _heat += "</div>"
+
+            _streak = 0
+            _d2 = _today
+            while _d2.strftime("%Y-%m-%d") in _act_set:
+                _streak += 1; _d2 -= timedelta(days=1)
+            _total  = (_today - _ys).days + 1
+            _active = sum(1 for _dd in _act_set if str(_ys) <= _dd <= str(_today))
+
+            _h1, _h2, _h3 = st.columns(3)
+            _h1.metric("🔥 Streak attuale",      f"{_streak} giorni")
+            _h2.metric("📅 Giorni attivi (anno)", _active)
+            _h3.metric("📊 % Consistenza",        f"{_active/_total*100:.0f}%")
+            st.markdown(_heat, unsafe_allow_html=True)
+
+            # Legenda
+            _legs = []
+            for _sp in sorted(df["type"].unique()):
+                _sil = get_sport_info(_sp)
+                _legs.append(f'<span style="display:inline-flex;align-items:center;gap:4px;font-size:11px;color:#888;margin:2px 6px">'
+                             f'<div style="width:10px;height:10px;border-radius:50%;background:{_sil["color"]}"></div>'
+                             f'{_sil["icon"]} {_sil["label"]}</span>')
+            st.markdown('<div style="display:flex;flex-wrap:wrap;margin-top:6px">' + "".join(_legs) + "</div>",
+                        unsafe_allow_html=True)
+
+
 
         # ──────────────────────────────────────────────
         # HELPER: genera KPI cards + grafici per un df
@@ -4872,314 +5287,6 @@ map.on('draw.delete', updateStats);
     # ============================================================
     # CALENDARIO
     # ============================================================
-    elif menu == "📅 Calendario":
-        st.markdown("## 📅 Calendario Allenamenti")
-
-        # ── State ──
-        for _k, _v in [("cal_selected_day", None), ("cal_view", "Mese"),
-                        ("cal_month", datetime.now().month), ("cal_year", datetime.now().year)]:
-            if _k not in st.session_state:
-                st.session_state[_k] = _v
-
-        # ── Filtri sport ──
-        all_sports = sorted(df["type"].unique().tolist())
-        if st.session_state.sport_filter is None:
-            st.session_state.sport_filter = set(all_sports)
-
-        st.markdown("**Filtra per sport:**")
-        _sport_cols = st.columns(min(len(all_sports) + 2, 10))
-        for _si, _sp in enumerate(all_sports):
-            _sinfo = get_sport_info(_sp)
-            with _sport_cols[_si % (len(_sport_cols))]:
-                if st.button(f"{_sinfo['icon']} {_sinfo['label']}", key=f"calsport_{_sp}",
-                             type="primary" if _sp in st.session_state.sport_filter else "secondary",
-                             use_container_width=True):
-                    _sf = st.session_state.sport_filter
-                    if _sp in _sf: _sf.discard(_sp)
-                    else:          _sf.add(_sp)
-                    st.rerun()
-        _ca, _cn, _ = st.columns([1, 1, 6])
-        with _ca:
-            if st.button("✅ Tutti",   key="calall",  use_container_width=True):
-                st.session_state.sport_filter = set(all_sports); st.rerun()
-        with _cn:
-            if st.button("❌ Nessuno", key="calnone", use_container_width=True):
-                st.session_state.sport_filter = set(); st.rerun()
-
-        df_cal = df[df["type"].isin(st.session_state.sport_filter)].copy()
-        df_cal["_ds"] = df_cal["start_date"].dt.strftime("%Y-%m-%d")
-        acts_by_day = {ds: grp for ds, grp in df_cal.groupby("_ds")}
-
-        st.divider()
-
-        # ── Vista switcher + navigazione ──
-        _vc1, _vc2, _vc3, _nav1, _nav2, _nav3 = st.columns([1,1,1,1,2,1])
-        for _col, _lbl, _view in [(_vc1,"📅 Settimana","Settimana"),
-                                   (_vc2,"🗓️ Mese","Mese"),
-                                   (_vc3,"📆 Anno","Anno")]:
-            with _col:
-                if st.button(_lbl, key=f"calview_{_view}",
-                             type="primary" if st.session_state.cal_view == _view else "secondary",
-                             use_container_width=True):
-                    st.session_state.cal_view = _view
-                    st.session_state.cal_selected_day = None
-                    st.rerun()
-
-        with _nav1:
-            if st.button("◀", key="calprev", use_container_width=True):
-                if st.session_state.cal_view == "Anno":
-                    st.session_state.cal_year -= 1
-                elif st.session_state.cal_month == 1:
-                    st.session_state.cal_month = 12; st.session_state.cal_year -= 1
-                else:
-                    st.session_state.cal_month -= 1
-                st.session_state.cal_selected_day = None; st.rerun()
-        with _nav2:
-            import calendar as _calmod
-            if st.session_state.cal_view == "Anno":
-                _nav_label = str(st.session_state.cal_year)
-            else:
-                _nav_label = f"{_calmod.month_name[st.session_state.cal_month]} {st.session_state.cal_year}"
-            st.markdown(f"<div style='text-align:center;font-size:17px;font-weight:700;padding:7px'>{_nav_label}</div>",
-                        unsafe_allow_html=True)
-        with _nav3:
-            if st.button("▶", key="calnext", use_container_width=True):
-                if st.session_state.cal_view == "Anno":
-                    st.session_state.cal_year += 1
-                elif st.session_state.cal_month == 12:
-                    st.session_state.cal_month = 1; st.session_state.cal_year += 1
-                else:
-                    st.session_state.cal_month += 1
-                st.session_state.cal_selected_day = None; st.rerun()
-
-        st.divider()
-
-        import calendar as _cm
-
-        # ════════════════════════════════════
-        # VISTA MESE e SETTIMANA
-        # ════════════════════════════════════
-        if st.session_state.cal_view in ("Mese", "Settimana"):
-            _y = st.session_state.cal_year
-            _m = st.session_state.cal_month
-
-            if st.session_state.cal_view == "Settimana":
-                _td  = datetime.now().date()
-                _ws  = _td - timedelta(days=_td.weekday())
-                _weeks = [[_ws + timedelta(days=i) for i in range(7)]]
-                _y, _m = _td.year, _td.month
-            else:
-                _weeks = _cm.Calendar(firstweekday=0).monthdatescalendar(_y, _m)
-
-            # Header giorni
-            _DAY_NAMES = ["Lun","Mar","Mer","Gio","Ven","Sab","Dom"]
-            _hcols = st.columns(7)
-            for _di, _dn in enumerate(_DAY_NAMES):
-                _hcols[_di].markdown(
-                    f"<div style='text-align:center;font-size:11px;color:#888;font-weight:600'>{_dn}</div>",
-                    unsafe_allow_html=True)
-
-            # Griglia settimane
-            for _week in _weeks:
-                _wcols = st.columns(7)
-                for _ci, _day in enumerate(_week):
-                    with _wcols[_ci]:
-                        _ds      = _day.strftime("%Y-%m-%d")
-                        _in_m    = (_day.month == _m)
-                        _is_tod  = (_day == datetime.now().date())
-                        _sel     = (st.session_state.cal_selected_day == _ds)
-                        _dacts   = acts_by_day.get(_ds)
-                        _has_act = _dacts is not None and not _dacts.empty
-
-                        # Colore bordo/sfondo cella
-                        if _sel:
-                            _bg, _brd = "rgba(233,69,96,0.2)", "2px solid #e94560"
-                        elif _is_tod:
-                            _bg, _brd = "rgba(33,150,243,0.12)", "1px solid #2196F366"
-                        elif not _in_m:
-                            _bg, _brd = "transparent", "1px solid transparent"
-                        elif _has_act:
-                            _bg, _brd = "rgba(255,255,255,0.04)", "1px solid rgba(255,255,255,0.1)"
-                        else:
-                            _bg, _brd = "rgba(255,255,255,0.01)", "1px solid rgba(255,255,255,0.04)"
-
-                        _num_col = "#e94560" if _is_tod else "#fff" if _in_m else "#444"
-
-                        # Pallini sport
-                        _dots = ""
-                        if _has_act:
-                            for _, _ar in _dacts.head(4).iterrows():
-                                _asi  = get_sport_info(_ar["type"])
-                                _tss  = float(_ar.get("tss") or 0)
-                                _sz   = max(7, min(15, int(_tss/7) + 7))
-                                _title = f"{_asi['label']} {_ar['distance']/1000:.1f}km TSS:{_tss:.0f}"
-                                _dots += (f'<div title="{_title}" style="width:{_sz}px;height:{_sz}px;'
-                                          f'border-radius:50%;background:{_asi["color"]};display:inline-block;margin:1px"></div>')
-                            if len(_dacts) > 4:
-                                _dots += f'<span style="font-size:9px;color:#888">+{len(_dacts)-4}</span>'
-
-                        st.markdown(
-                            f'<div style="background:{_bg};border:{_brd};border-radius:10px;'
-                            f'padding:5px 3px 4px;min-height:56px;text-align:center;pointer-events:none">'
-                            f'<div style="font-size:12px;font-weight:700;color:{_num_col}">{_day.day if _in_m else ""}</div>'
-                            f'<div style="display:flex;flex-wrap:wrap;justify-content:center;gap:1px;margin-top:3px">{_dots}</div>'
-                            f'</div>',
-                            unsafe_allow_html=True)
-
-                        # Bottone click — solo sui giorni con attività
-                        if _has_act and _in_m:
-                            _btn_lbl = f"{'●' if not _sel else '○'}"
-                            if st.button(_btn_lbl, key=f"cd_{_ds}",
-                                         help=f"{len(_dacts)} {'attività' if len(_dacts)>1 else 'attività'} — clicca per dettaglio",
-                                         use_container_width=True):
-                                st.session_state.cal_selected_day = None if _sel else _ds
-                                st.rerun()
-
-        # ════════════════════════════════════
-        # VISTA ANNO
-        # ════════════════════════════════════
-        elif st.session_state.cal_view == "Anno":
-            _y = st.session_state.cal_year
-            for _row_s in range(0, 12, 3):
-                _mcols = st.columns(3)
-                for _mi, _mn in enumerate(range(_row_s+1, _row_s+4)):
-                    with _mcols[_mi]:
-                        st.markdown(
-                            f"<div style='font-size:13px;font-weight:700;color:#aaa;margin-bottom:4px'>"
-                            f"{_cm.month_name[_mn]}</div>",
-                            unsafe_allow_html=True)
-                        _yr_weeks = _cm.Calendar(firstweekday=0).monthdatescalendar(_y, _mn)
-                        for _yw in _yr_weeks:
-                            _yc = st.columns(7)
-                            for _yci, _yd in enumerate(_yw):
-                                with _yc[_yci]:
-                                    if _yd.month != _mn:
-                                        st.markdown('<div style="height:16px"></div>', unsafe_allow_html=True)
-                                        continue
-                                    _yds   = _yd.strftime("%Y-%m-%d")
-                                    _ydact = acts_by_day.get(_yds)
-                                    _yhas  = _ydact is not None and not _ydact.empty
-                                    _ysel  = (st.session_state.cal_selected_day == _yds)
-                                    if _yhas:
-                                        _ysp   = _ydact["type"].value_counts().index[0]
-                                        _ysi   = get_sport_info(_ysp)
-                                        _ysz   = 11 if len(_ydact) > 1 else 9
-                                        _ybrd  = "2px solid #e94560" if _ysel else "none"
-                                        st.markdown(
-                                            f'<div title="{_yds}: {len(_ydact)} att." style="width:{_ysz}px;height:{_ysz}px;'
-                                            f'border-radius:50%;background:{_ysi["color"]};border:{_ybrd};margin:auto;cursor:pointer"></div>',
-                                            unsafe_allow_html=True)
-                                        if st.button("·", key=f"yrd_{_yds}",
-                                                     help=f"{len(_ydact)} att. — click per dettaglio"):
-                                            st.session_state.cal_selected_day = _yds
-                                            st.session_state.cal_view  = "Mese"
-                                            st.session_state.cal_month = _yd.month
-                                            st.session_state.cal_year  = _yd.year
-                                            st.rerun()
-                                    else:
-                                        st.markdown(
-                                            f'<div title="{_yds}" style="width:7px;height:7px;border-radius:50%;'
-                                            f'background:#1e1e2e;border:1px solid #333;margin:auto"></div>',
-                                            unsafe_allow_html=True)
-
-        st.divider()
-
-        # ════════════════════════════════════
-        # DETTAGLIO GIORNO SELEZIONATO
-        # ════════════════════════════════════
-        _sel_day = st.session_state.cal_selected_day
-        if _sel_day and _sel_day in acts_by_day:
-            _sel_acts = acts_by_day[_sel_day]
-            st.markdown(f"### 📋 {_sel_day} — {len(_sel_acts)} attività")
-            for _, _ar in _sel_acts.iterrows():
-                _asi     = get_sport_info(_ar["type"])
-                _dist_km = _ar["distance"] / 1000
-                _hrs     = _ar["moving_time"] / 3600
-                _tss_v   = float(_ar.get("tss") or 0)
-                _elev    = float(_ar.get("total_elevation_gain") or 0)
-                _hr_avg  = _ar.get("average_heartrate")
-                _name_a  = _ar.get("name") or _ar["type"]
-                _pace_str = ""
-                if _ar["type"] in ["Run","TrailRun","VirtualRun"] and _dist_km > 0:
-                    _ps = _ar["moving_time"] / _dist_km
-                    _pace_str = f"🏃 <b>{int(_ps//60)}:{int(_ps%60):02d} /km</b>"
-                _hr_str  = f"❤️ <b>{int(_hr_avg)} bpm</b>" if _hr_avg and pd.notna(_hr_avg) else ""
-                _elev_str = f"⛰️ <b>{int(_elev)} m</b>" if _elev > 0 else ""
-                _pills = "".join([
-                    f'<span style="background:rgba(255,255,255,0.07);border-radius:20px;padding:3px 12px;font-size:12px;margin:2px">📏 <b>{_dist_km:.1f} km</b></span>',
-                    f'<span style="background:rgba(255,255,255,0.07);border-radius:20px;padding:3px 12px;font-size:12px;margin:2px">⏱️ <b>{int(_hrs)}h {int((_hrs%1)*60)}m</b></span>',
-                    f'<span style="background:rgba(255,255,255,0.07);border-radius:20px;padding:3px 12px;font-size:12px;margin:2px">{_pace_str}</span>' if _pace_str else "",
-                    f'<span style="background:rgba(255,255,255,0.07);border-radius:20px;padding:3px 12px;font-size:12px;margin:2px">{_hr_str}</span>' if _hr_str else "",
-                    f'<span style="background:rgba(255,255,255,0.07);border-radius:20px;padding:3px 12px;font-size:12px;margin:2px">⚡ <b>{_tss_v:.0f} TSS</b></span>',
-                    f'<span style="background:rgba(255,255,255,0.07);border-radius:20px;padding:3px 12px;font-size:12px;margin:2px">{_elev_str}</span>' if _elev_str else "",
-                ])
-                st.markdown(
-                    f'<div style="background:rgba(255,255,255,0.04);border:1px solid {_asi["color"]}44;'
-                    f'border-left:4px solid {_asi["color"]};border-radius:12px;padding:14px 18px;margin:6px 0">'
-                    f'<div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">'
-                    f'<span style="font-size:22px">{_asi["icon"]}</span>'
-                    f'<span style="font-size:16px;font-weight:700;color:#eee">{_name_a}</span>'
-                    f'<span style="font-size:12px;color:#888">{_ar["start_date"].strftime("%H:%M")}</span>'
-                    f'</div><div style="display:flex;flex-wrap:wrap;gap:4px">{_pills}</div></div>',
-                    unsafe_allow_html=True)
-        elif _sel_day:
-            st.info(f"Nessuna attività il {_sel_day} (controlla i filtri sport).")
-
-        st.divider()
-
-        # ── Heatmap consistenza annuale ──
-        st.markdown("#### 🟩 Consistenza Annuale")
-        _today   = datetime.now().date()
-        _ys      = _today.replace(month=1, day=1)
-        _wks     = []
-        _cw      = []
-        _d       = _ys
-        _act_set = set(acts_by_day.keys())
-        while _d <= _today:
-            _dstr = _d.strftime("%Y-%m-%d")
-            _dact = acts_by_day.get(_dstr)
-            if _dact is not None and not _dact.empty:
-                _top = _dact["type"].value_counts().index[0]
-                _clr = get_sport_info(_top)["color"]
-            else:
-                _clr = "#1e1e2e"
-            _brd = "#333" if _clr == "#1e1e2e" else "transparent"
-            _cw.append(f'<div title="{_dstr}" style="width:14px;height:14px;border-radius:3px;'
-                       f'background:{_clr};border:1px solid {_brd}"></div>')
-            if _d.weekday() == 6:
-                _wks.append("".join(_cw)); _cw = []
-            _d += timedelta(days=1)
-        if _cw:
-            _wks.append("".join(_cw))
-
-        _heat = '<div style="display:flex;gap:3px">'
-        for _w in _wks:
-            _heat += f'<div style="display:flex;flex-direction:column;gap:2px">{_w}</div>'
-        _heat += "</div>"
-
-        _streak = 0
-        _d2 = _today
-        while _d2.strftime("%Y-%m-%d") in _act_set:
-            _streak += 1; _d2 -= timedelta(days=1)
-        _total  = (_today - _ys).days + 1
-        _active = sum(1 for _dd in _act_set if str(_ys) <= _dd <= str(_today))
-
-        _h1, _h2, _h3 = st.columns(3)
-        _h1.metric("🔥 Streak attuale",      f"{_streak} giorni")
-        _h2.metric("📅 Giorni attivi (anno)", _active)
-        _h3.metric("📊 % Consistenza",        f"{_active/_total*100:.0f}%")
-        st.markdown(_heat, unsafe_allow_html=True)
-
-        # Legenda
-        _legs = []
-        for _sp in sorted(df["type"].unique()):
-            _sil = get_sport_info(_sp)
-            _legs.append(f'<span style="display:inline-flex;align-items:center;gap:4px;font-size:11px;color:#888;margin:2px 6px">'
-                         f'<div style="width:10px;height:10px;border-radius:50%;background:{_sil["color"]}"></div>'
-                         f'{_sil["icon"]} {_sil["label"]}</span>')
-        st.markdown('<div style="display:flex;flex-wrap:wrap;margin-top:6px">' + "".join(_legs) + "</div>",
-                    unsafe_allow_html=True)
-
     # ============================================================
     # COACH CHAT
     # ============================================================
