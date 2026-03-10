@@ -1603,7 +1603,6 @@ if token_ok:
             "🗺️ Mappe 3D",
             "📅 Storico & Calendario",
             "💬 Coach Chat",
-            "🏅 Record Personali",
             "👤 Profilo Fisico",
         ], label_visibility="collapsed")
 
@@ -2064,27 +2063,34 @@ if token_ok:
             # --- AI Analisi: solo per la prima attività (la più recente) ---
             if idx == 0:
                 with st.expander("🤖 Analisi Coach", expanded=True):
-                    with st.spinner("Il coach sta analizzando..."):
-                        try:
-                            _ctx = (
-                                f"Sport: {row['type']} ({s['label']}). "
-                                f"Distanza: {m['dist_str']}. Durata: {m['dur_str']}. "
-                                f"Passo/Vel: {m['pace_str']}. Dislivello: {m['elev']}. "
-                                f"FC Media: {m['hr_avg']}, FC Max: {m['hr_max']}. "
-                                f"Watt: {m['watts']}. TSS: {row['tss']:.1f}. "
-                                f"CTL attuale: {current_ctl:.1f}, TSB: {current_tsb:.1f}, ATL: {current_atl:.1f}. "
-                                f"Stato forma: {status_label}."
-                            )
-                            _prompt = (
-                                "Sei un coach sportivo di alto livello. "
-                                "Commenta questa sessione: qualità dell'allenamento, punti di forza e debolezze, "
-                                "come influisce sul carico settimanale, e suggerisci cosa fare nella prossima sessione "
-                                "in base allo stato di forma attuale. Sii specifico e pratico. Usa massimo 4 paragrafi."
-                            )
-                            _result = ai_generate(f"{_ctx}\n\n{_prompt}")
-                            st.info(_result)
-                        except Exception as e:
-                            st.error(f"Errore AI: {e}")
+                    # Cache in session_state — non ricalcolare se stessa attività
+                    _act_id = str(row.get("id", row["start_date"]))
+                    _cache_key = f"ai_analysis_{_act_id}"
+                    if _cache_key in st.session_state:
+                        st.info(st.session_state[_cache_key])
+                    else:
+                        with st.spinner("Il coach sta analizzando..."):
+                            try:
+                                _ctx = (
+                                    f"Sport: {row['type']} ({s['label']}). "
+                                    f"Distanza: {m['dist_str']}. Durata: {m['dur_str']}. "
+                                    f"Passo/Vel: {m['pace_str']}. Dislivello: {m['elev']}. "
+                                    f"FC Media: {m['hr_avg']}, FC Max: {m['hr_max']}. "
+                                    f"Watt: {m['watts']}. TSS: {row['tss']:.1f}. "
+                                    f"CTL attuale: {current_ctl:.1f}, TSB: {current_tsb:.1f}, ATL: {current_atl:.1f}. "
+                                    f"Stato forma: {status_label}."
+                                )
+                                _prompt = (
+                                    "Sei un coach sportivo di alto livello. "
+                                    "Commenta questa sessione: qualità dell'allenamento, punti di forza e debolezze, "
+                                    "come influisce sul carico settimanale, e suggerisci cosa fare nella prossima sessione "
+                                    "in base allo stato di forma attuale. Sii specifico e pratico. Usa massimo 4 paragrafi."
+                                )
+                                _result = ai_generate(f"{_ctx}\n\n{_prompt}")
+                                st.session_state[_cache_key] = _result
+                                st.info(_result)
+                            except Exception as e:
+                                st.error(f"Errore AI: {e}")
 
         # --- Grafico CTL/ATL/TSB ---
         st.divider()
@@ -5378,128 +5384,9 @@ map.on('draw.delete', updateStats);
     # ============================================================
     # RECORD PERSONALI
     # ============================================================
-    elif menu == "🏅 Record Personali":
-        st.markdown("## 🏅 Record Personali")
-
-        sports_available = df["type"].value_counts().index.tolist()
-        selected_pr_sport = st.selectbox(
-            "Sport:", sports_available,
-            format_func=lambda x: f"{get_sport_info(x)['icon']} {get_sport_info(x)['label']}"
-        )
-        df_s = df[df["type"] == selected_pr_sport].copy()
-
-        if df_s.empty:
-            st.info("Nessuna attività per questo sport.")
-        else:
-            st.divider()
-            col1, col2, col3, col4 = st.columns(4)
-
-            # Distanza massima
-            best_dist = df_s.loc[df_s["distance"].idxmax()]
-            col1.metric("📏 Distanza Massima",
-                         f"{best_dist['distance']/1000:.2f} km",
-                         help=f"{best_dist['name']} — {best_dist['start_date'].strftime('%d/%m/%Y')}")
-
-            # Dislivello massimo
-            best_elev = df_s.loc[df_s["total_elevation_gain"].fillna(0).idxmax()]
-            col2.metric("⛰️ Dislivello Max",
-                         f"{best_elev['total_elevation_gain']:.0f} m",
-                         help=f"{best_elev['name']} — {best_elev['start_date'].strftime('%d/%m/%Y')}")
-
-            # TSS massimo (sessione più dura)
-            best_tss = df_s.loc[df_s["tss"].idxmax()]
-            col3.metric("🔥 TSS Massimo",
-                         f"{best_tss['tss']:.1f}",
-                         help=f"{best_tss['name']} — {best_tss['start_date'].strftime('%d/%m/%Y')}")
-
-            # Sessione più lunga (tempo)
-            best_time = df_s.loc[df_s["moving_time"].idxmax()]
-            hrs = int(best_time["moving_time"] // 3600)
-            mins = int((best_time["moving_time"] % 3600) // 60)
-            col4.metric("⏱️ Sessione più lunga",
-                         f"{hrs}h {mins:02d}m",
-                         help=f"{best_time['name']} — {best_time['start_date'].strftime('%d/%m/%Y')}")
-
-            st.divider()
-
-            # Passo/Velocità best per distanza
-            if selected_pr_sport in ("Run", "TrailRun", "Hike", "Walk"):
-                st.markdown("#### 🏆 Miglior Passo per Distanza")
-                pace_cols = st.columns(4)
-                for i, (dist_thr, label) in enumerate([(5, "5 km"), (10, "10 km"), (21.097, "Mezza"), (42.195, "Maratona")]):
-                    filtered = df_s[df_s["distance"] >= dist_thr * 1000]
-                    if not filtered.empty:
-                        # Passo migliore = più veloce = min moving_time/distance
-                        filtered = filtered.copy()
-                        filtered["pace_sec_km"] = filtered["moving_time"] / (filtered["distance"] / 1000)
-                        best = filtered.loc[filtered["pace_sec_km"].idxmin()]
-                        pace_val = best["pace_sec_km"]
-                        pace_cols[i].metric(
-                            f"🏃 {label}",
-                            f"{int(pace_val // 60)}:{int(pace_val % 60):02d} /km",
-                            help=f"{best['name']} — {best['start_date'].strftime('%d/%m/%Y')}"
-                        )
-                    else:
-                        pace_cols[i].metric(f"🏃 {label}", "N/A")
-
-            elif selected_pr_sport in ("Ride", "VirtualRide", "MountainBikeRide"):
-                st.markdown("#### 🏆 Velocità Massima Media")
-                speed_cols = st.columns(3)
-                for i, (dist_thr, label) in enumerate([(20, "20 km"), (50, "50 km"), (100, "100 km")]):
-                    filtered = df_s[df_s["distance"] >= dist_thr * 1000].copy()
-                    if not filtered.empty:
-                        filtered["speed"] = filtered["distance"] / filtered["moving_time"] * 3.6
-                        best = filtered.loc[filtered["speed"].idxmax()]
-                        speed_cols[i].metric(f"🚴 {label}", f"{best['speed']:.1f} km/h",
-                                              help=f"{best['name']} — {best['start_date'].strftime('%d/%m/%Y')}")
-                    else:
-                        speed_cols[i].metric(f"🚴 {label}", "N/A")
-
-            st.divider()
-
-            # Andamento nel tempo
-            st.markdown("#### 📈 Evoluzione Distanza nel Tempo")
-            fig_pr = go.Figure()
-            fig_pr.add_trace(go.Scatter(
-                x=df_s["start_date"],
-                y=df_s["distance"] / 1000,
-                mode="markers+lines",
-                marker=dict(color=get_sport_info(selected_pr_sport)["color"], size=7),
-                line=dict(color=get_sport_info(selected_pr_sport)["color"], width=1.5, dash="dot"),
-                name="Distanza (km)",
-            ))
-            # Running max
-            df_s_cummax = df_s.set_index("start_date")["distance"].cummax() / 1000
-            fig_pr.add_trace(go.Scatter(
-                x=df_s_cummax.index, y=df_s_cummax.values,
-                mode="lines", line=dict(color="#FFD700", width=2),
-                name="Record storico", fill="tonexty", fillcolor="rgba(255,215,0,0.05)"
-            ))
-            fig_pr.update_layout(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-                                   height=300, margin=dict(l=0, r=0, t=10, b=0),
-                                   xaxis=dict(gridcolor="rgba(255,255,255,0.05)"),
-                                   yaxis=dict(gridcolor="rgba(255,255,255,0.05)"))
-            st.plotly_chart(fig_pr, use_container_width=True)
-
-            # Tabella top 10
-            st.markdown("#### 📋 Top 10 Sessioni per Distanza")
-            top10 = df_s.nlargest(10, "distance")[
-                ["start_date", "name", "distance", "moving_time", "total_elevation_gain", "tss"]
-            ].copy()
-            top10["Km"]       = (top10["distance"] / 1000).round(2)
-            top10["Durata"]   = top10["moving_time"].apply(
-                lambda x: f"{int(x//3600)}h {int((x%3600)//60):02d}m")
-            top10["Dislivello"] = top10["total_elevation_gain"].fillna(0).round(0).astype(int)
-            top10["Data"]     = top10["start_date"].dt.strftime("%d/%m/%Y")
-            st.dataframe(
-                top10[["Data", "name", "Km", "Durata", "Dislivello", "tss"]].rename(
-                    columns={"name": "Nome", "tss": "TSS"}
-                ),
-                use_container_width=True, hide_index=True
-            )
 
     # ============================================================
-    # PROFILO FISICO
+    # PROFILO FISICO + RECORD PERSONALI
     # ============================================================
     elif menu == "👤 Profilo Fisico":
         st.markdown("## 👤 Parametri Atleta")
@@ -5517,15 +5404,96 @@ map.on('draw.delete', updateStats);
         st.divider()
         st.info("Questi parametri influenzano il calcolo del TSS e tutti i valori di fitness.")
 
+        # ── Auto-rilevamento parametri ─────────────────────────────────
+        _df90 = df[df["start_date"] >= (df["start_date"].max() - timedelta(days=90))]
+
+        # FC Max: massimo HR registrato nelle ultime 90gg
+        _auto_fc_max = None
+        _auto_fc_max_date = None
+        _fcmax_series = _df90["max_heartrate"].dropna()
+        if not _fcmax_series.empty:
+            _auto_fc_max = int(_fcmax_series.max())
+            _row_fcmax = _df90.loc[_df90["max_heartrate"].fillna(0).idxmax()]
+            _auto_fc_max_date = _row_fcmax["start_date"].strftime("%d/%m/%Y")
+
+        # FC Riposo: minima HR da RingConn (ultimi 30gg)
+        _auto_fc_min = None
+        _auto_fc_min_src = None
+        rc_v_prof = st.session_state.get("rc_vitals")
+        if rc_v_prof is not None and "hr_min" in rc_v_prof.columns:
+            _rc_min = rc_v_prof["hr_min"].dropna().tail(30)
+            if not _rc_min.empty:
+                _auto_fc_min = int(_rc_min.min())
+                _auto_fc_min_src = f"RingConn — min 30gg: {_auto_fc_min} bpm"
+
+        # FTP: stima 95% miglior avg_watts su attività ciclismo >45min, ultime 90gg
+        _auto_ftp = None
+        _auto_ftp_src = None
+        _df_ride90 = _df90[_df90["type"].isin(["Ride","VirtualRide"])]
+        if not _df_ride90.empty:
+            _long_rides = _df_ride90[_df_ride90["moving_time"] > 2700]
+            if not _long_rides.empty:
+                _w_vals = _long_rides["average_watts"].dropna()
+                if not _w_vals.empty:
+                    _best_ride = _long_rides.loc[_long_rides["average_watts"].fillna(0).idxmax()]
+                    _auto_ftp = int(float(_best_ride["average_watts"]) * 0.95)
+                    _auto_ftp_src = f"95% avg watts — {_best_ride['start_date'].strftime('%d/%m/%Y')}"
+
+        # ── Banner suggerimenti ─────────────────────────────────────────
+        _suggestions = []
+        if _auto_fc_max and _auto_fc_max != u["fc_max"]:
+            _suggestions.append(("❤️ FC Max rilevata", f"{_auto_fc_max} bpm",
+                                  f"da attività del {_auto_fc_max_date}", "fc_max", _auto_fc_max))
+        if _auto_fc_min and _auto_fc_min != u["fc_min"]:
+            _suggestions.append(("💚 FC Riposo rilevata", f"{_auto_fc_min} bpm",
+                                  _auto_fc_min_src, "fc_min", _auto_fc_min))
+        if _auto_ftp and _auto_ftp != u.get("ftp", 200):
+            _suggestions.append(("⚡ FTP stimato", f"{_auto_ftp} W",
+                                  _auto_ftp_src, "ftp", _auto_ftp))
+
+        if _suggestions:
+            st.markdown("#### 🔄 Aggiornamenti Suggeriti")
+            st.caption("Basati sui tuoi dati recenti (ultimi 90 giorni). Clicca per applicare.")
+            _scols = st.columns(len(_suggestions))
+            for _si, (_label, _val, _src, _key, _newval) in enumerate(_suggestions):
+                with _scols[_si]:
+                    st.markdown(f"""
+                    <div style="background:#2196F314;border:1px solid #2196F344;border-radius:12px;
+                                padding:12px 16px;text-align:center;margin-bottom:8px">
+                        <div style="font-size:13px;font-weight:700;color:#2196F3">{_label}</div>
+                        <div style="font-size:22px;font-weight:900;color:#111;margin:4px 0">{_val}</div>
+                        <div style="font-size:10px;color:#666">{_src}</div>
+                    </div>""", unsafe_allow_html=True)
+                    if st.button(f"✅ Applica {_val}", key=f"auto_{_key}", use_container_width=True):
+                        _ud = dict(st.session_state.user_data)
+                        _ud[_key] = _newval
+                        st.session_state.user_data = _ud
+                        st.cache_data.clear()
+                        st.success(f"✅ {_label} aggiornata a {_val}!")
+                        st.rerun()
+
+        st.markdown("#### ✏️ Inserimento Manuale")
         with st.form("settings"):
             col1, col2 = st.columns(2)
             with col1:
-                peso   = st.number_input("⚖️ Peso (kg)",     value=float(u["peso"]),       min_value=30.0,  max_value=200.0)
-                fc_min = st.number_input("💚 FC a Riposo",   value=int(u["fc_min"]),        min_value=30,    max_value=100)
+                peso   = st.number_input("⚖️ Peso (kg)", value=float(u["peso"]),
+                                          min_value=30.0, max_value=200.0)
+                fc_min = st.number_input(
+                    "💚 FC a Riposo", value=int(u["fc_min"]), min_value=30, max_value=100,
+                    help=f"Auto-rilevata: {_auto_fc_min} bpm ({_auto_fc_min_src})"
+                         if _auto_fc_min else "Carica dati RingConn per il rilevamento automatico"
+                )
             with col2:
-                fc_max = st.number_input("❤️ FC Massima",    value=int(u["fc_max"]),        min_value=100,   max_value=250)
-                ftp    = st.number_input("⚡ FTP (Watt)",    value=int(u.get("ftp", 200)), min_value=50,    max_value=600,
-                                          help="Functional Threshold Power — per TSS in bici")
+                fc_max = st.number_input(
+                    "❤️ FC Massima", value=int(u["fc_max"]), min_value=100, max_value=250,
+                    help=f"Max rilevata nelle ultime attività: {_auto_fc_max} bpm ({_auto_fc_max_date})"
+                         if _auto_fc_max else "Non rilevata nelle ultime 90gg"
+                )
+                ftp    = st.number_input(
+                    "⚡ FTP (Watt)", value=int(u.get("ftp", 200)), min_value=50, max_value=600,
+                    help=f"Stimato: {_auto_ftp} W ({_auto_ftp_src})"
+                         if _auto_ftp else "Nessuna attività ciclismo >45min nelle ultime 90gg"
+                )
             if st.form_submit_button("💾 Aggiorna Parametri", use_container_width=True):
                 st.session_state.user_data = {"peso": peso, "fc_min": fc_min, "fc_max": fc_max, "ftp": ftp}
                 st.cache_data.clear()
@@ -5533,23 +5501,92 @@ map.on('draw.delete', updateStats);
                 st.rerun()
 
         st.divider()
-        st.markdown("### 📈 Riepilogo Stagione")
-        c1, c2, c3, c4, c5 = st.columns(5)
-        c1.metric("Attività",     len(df))
-        c2.metric("Km Totali",    f"{df['distance'].sum()/1000:.0f}")
-        c3.metric("Ore Totali",   f"{df['moving_time'].sum()/3600:.0f}")
-        c4.metric("Dislivello",   f"{df['total_elevation_gain'].sum()/1000:.0f} k m")
-        c5.metric("TSS Totale",   f"{df['tss'].sum():.0f}")
 
-        sport_df = df["type"].value_counts().reset_index()
-        sport_df.columns = ["Sport", "Conteggio"]
-        sport_df["Label"] = sport_df["Sport"].apply(
-            lambda x: f"{get_sport_info(x)['icon']} {get_sport_info(x)['label']}")
-        fig_sport = px.pie(sport_df, names="Label", values="Conteggio",
-                            color_discrete_sequence=px.colors.qualitative.Set3, hole=0.4)
-        fig_sport.update_layout(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-                                  height=300, margin=dict(l=0, r=0, t=0, b=0))
-        st.plotly_chart(fig_sport, use_container_width=True)
+        # ── RECORD PERSONALI ────────────────────────────────────────────
+        st.markdown("## 🏅 Record Personali")
+
+        sports_available = df["type"].value_counts().index.tolist()
+        selected_pr_sport = st.selectbox(
+            "Sport:", sports_available,
+            format_func=lambda x: f"{get_sport_info(x)['icon']} {get_sport_info(x)['label']}"
+        )
+        df_s = df[df["type"] == selected_pr_sport].copy()
+
+        if df_s.empty:
+            st.info("Nessuna attività per questo sport.")
+        else:
+            st.divider()
+            col1, col2, col3, col4 = st.columns(4)
+            best_dist = df_s.loc[df_s["distance"].idxmax()]
+            col1.metric("📏 Distanza Massima", f"{best_dist['distance']/1000:.2f} km",
+                         help=f"{best_dist['name']} — {best_dist['start_date'].strftime('%d/%m/%Y')}")
+            best_elev = df_s.loc[df_s["total_elevation_gain"].fillna(0).idxmax()]
+            col2.metric("⛰️ Dislivello Max", f"{best_elev['total_elevation_gain']:.0f} m",
+                         help=f"{best_elev['name']} — {best_elev['start_date'].strftime('%d/%m/%Y')}")
+            best_tss = df_s.loc[df_s["tss"].idxmax()]
+            col3.metric("🔥 TSS Massimo", f"{best_tss['tss']:.1f}",
+                         help=f"{best_tss['name']} — {best_tss['start_date'].strftime('%d/%m/%Y')}")
+            best_time = df_s.loc[df_s["moving_time"].idxmax()]
+            hrs = int(best_time["moving_time"] // 3600)
+            mins_t = int((best_time["moving_time"] % 3600) // 60)
+            col4.metric("⏱️ Sessione più lunga", f"{hrs}h {mins_t:02d}m",
+                         help=f"{best_time['name']} — {best_time['start_date'].strftime('%d/%m/%Y')}")
+
+            st.divider()
+            if selected_pr_sport in ("Run", "TrailRun", "Hike", "Walk"):
+                st.markdown("#### 🏆 Miglior Passo per Distanza")
+                pace_cols = st.columns(4)
+                for i, (dist_thr, label) in enumerate([(5,"5 km"),(10,"10 km"),(21.097,"Mezza"),(42.195,"Maratona")]):
+                    filtered = df_s[df_s["distance"] >= dist_thr * 1000].copy()
+                    if not filtered.empty:
+                        filtered["pace_sec_km"] = filtered["moving_time"] / (filtered["distance"] / 1000)
+                        best = filtered.loc[filtered["pace_sec_km"].idxmin()]
+                        pv = best["pace_sec_km"]
+                        pace_cols[i].metric(f"🏃 {label}", f"{int(pv//60)}:{int(pv%60):02d} /km",
+                                             help=f"{best['name']} — {best['start_date'].strftime('%d/%m/%Y')}")
+                    else:
+                        pace_cols[i].metric(f"🏃 {label}", "N/A")
+            elif selected_pr_sport in ("Ride","VirtualRide","MountainBikeRide"):
+                st.markdown("#### 🏆 Velocità Massima Media")
+                speed_cols = st.columns(3)
+                for i, (dist_thr, label) in enumerate([(20,"20 km"),(50,"50 km"),(100,"100 km")]):
+                    filtered = df_s[df_s["distance"] >= dist_thr * 1000].copy()
+                    if not filtered.empty:
+                        filtered["speed"] = filtered["distance"] / filtered["moving_time"] * 3.6
+                        best = filtered.loc[filtered["speed"].idxmax()]
+                        speed_cols[i].metric(f"🚴 {label}", f"{best['speed']:.1f} km/h",
+                                              help=f"{best['name']} — {best['start_date'].strftime('%d/%m/%Y')}")
+                    else:
+                        speed_cols[i].metric(f"🚴 {label}", "N/A")
+
+            st.divider()
+            st.markdown("#### 📈 Evoluzione Distanza nel Tempo")
+            fig_pr = go.Figure()
+            fig_pr.add_trace(go.Scatter(
+                x=df_s["start_date"], y=df_s["distance"]/1000, mode="markers+lines",
+                marker=dict(color=get_sport_info(selected_pr_sport)["color"], size=7),
+                line=dict(color=get_sport_info(selected_pr_sport)["color"], width=1.5, dash="dot"),
+                name="Distanza (km)"))
+            df_s_cummax = df_s.set_index("start_date")["distance"].cummax()/1000
+            fig_pr.add_trace(go.Scatter(
+                x=df_s_cummax.index, y=df_s_cummax.values, mode="lines",
+                line=dict(color="#FFD700", width=2), name="Record storico",
+                fill="tonexty", fillcolor="rgba(255,215,0,0.05)"))
+            fig_pr.update_layout(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                                  height=270, margin=dict(l=0,r=0,t=10,b=0),
+                                  xaxis=dict(gridcolor="rgba(255,255,255,0.05)"),
+                                  yaxis=dict(gridcolor="rgba(255,255,255,0.05)"))
+            st.plotly_chart(fig_pr, use_container_width=True)
+
+            st.markdown("#### 📋 Top 10 Sessioni per Distanza")
+            top10 = df_s.nlargest(10,"distance")[
+                ["start_date","name","distance","moving_time","total_elevation_gain","tss"]].copy()
+            top10["Km"]       = (top10["distance"]/1000).round(2)
+            top10["Durata"]   = top10["moving_time"].apply(lambda x: f"{int(x//3600)}h {int((x%3600)//60):02d}m")
+            top10["Dislivello"] = top10["total_elevation_gain"].fillna(0).round(0).astype(int)
+            top10["Data"]     = top10["start_date"].dt.strftime("%d/%m/%Y")
+            st.dataframe(top10[["Data","name","Km","Durata","Dislivello","tss"]].rename(
+                columns={"name":"Nome","tss":"TSS"}), use_container_width=True, hide_index=True)
 
 # ============================================================
 # LOGIN
