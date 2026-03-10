@@ -3141,6 +3141,10 @@ Rispondi in italiano, tono professionale ma diretto, massimo 300 parole."""
                                        'sky-atmosphere-sun-intensity': 15 }});
                     """ if show_terrain else ""
 
+                    slope_legend_display = "block" if show_slope else "none"
+                    act_name_safe = (sel_row.get('name','Attività') or 'Attività')[:25]
+                    act_icon_safe = sel_si['icon']
+
                     html_map = f"""<!DOCTYPE html>
 <html>
 <head>
@@ -3149,39 +3153,40 @@ Rispondi in italiano, tono professionale ma diretto, massimo 300 parole."""
 <link href="https://api.mapbox.com/mapbox-gl-js/v3.3.0/mapbox-gl.css" rel="stylesheet"/>
 <script src="https://api.mapbox.com/mapbox-gl-js/v3.3.0/mapbox-gl.js"></script>
 <style>
-  body {{ margin:0; padding:0; background:#0e1117; }}
-  #map {{ width:100%; height:580px; }}
+  html, body {{ margin:0; padding:0; width:100%; height:100%; overflow:hidden; background:#0e1117; }}
+  #map-wrap {{ position:relative; width:100%; height:100%; }}
+  #map {{ position:absolute; top:0; left:0; width:100%; height:100%; }}
   .legend {{
-    position:absolute; bottom:30px; left:10px; background:rgba(0,0,0,0.75);
+    position:absolute; bottom:30px; left:10px; background:rgba(14,17,23,0.88);
     color:#fff; padding:10px 14px; border-radius:10px; font-size:12px;
-    font-family:sans-serif; line-height:1.8; display:none;
+    font-family:sans-serif; line-height:1.8; z-index:10;
+    display:{slope_legend_display};
   }}
-  .legend.visible {{ display:block; }}
   .legend-row {{ display:flex; align-items:center; gap:8px; }}
   .legend-dot {{ width:12px; height:12px; border-radius:50%; flex-shrink:0; }}
   #info-panel {{
-    position:absolute; top:10px; right:10px; background:rgba(0,0,0,0.75);
+    position:absolute; top:10px; right:10px; background:rgba(14,17,23,0.88);
     color:#fff; padding:12px 16px; border-radius:10px; font-size:12px;
-    font-family:sans-serif; min-width:160px;
+    font-family:sans-serif; min-width:160px; z-index:10;
   }}
-  .compass {{ position:absolute; top:10px; left:10px; }}
 </style>
 </head>
 <body>
-<div id="map">
-  <div class="legend {'visible' if show_slope else ''}' id='slope-legend'>
+<div id="map-wrap">
+  <div id="map"></div>
+  <div class="legend">
     <b>Pendenza</b>
-    <div class='legend-row'><div class='legend-dot' style='background:#4CAF50'></div> &lt; 25° sicuro</div>
-    <div class='legend-row'><div class='legend-dot' style='background:#FFEB3B'></div> 25-30° attenzione</div>
-    <div class='legend-row'><div class='legend-dot' style='background:#FF9800'></div> 30-35° rischio</div>
-    <div class='legend-row'><div class='legend-dot' style='background:#F44336'></div> &gt; 35° pericolo valanghe</div>
-    <div style='margin-top:6px;color:#aaa;font-size:10px'>⚠️ Stima approssimativa</div>
+    <div class="legend-row"><div class="legend-dot" style="background:#4CAF50"></div> &lt; 25° sicuro</div>
+    <div class="legend-row"><div class="legend-dot" style="background:#FFEB3B"></div> 25-30° attenzione</div>
+    <div class="legend-row"><div class="legend-dot" style="background:#FF9800"></div> 30-35° rischio</div>
+    <div class="legend-row"><div class="legend-dot" style="background:#F44336"></div> &gt; 35° pericolo</div>
+    <div style="margin-top:6px;color:#aaa;font-size:10px">&#9888; Stima approssimativa</div>
   </div>
-  <div id='info-panel'>
-    <div style='font-weight:700;margin-bottom:6px'>{sel_si['icon']} {sel_row.get('name','Attività')[:25]}</div>
-    <div>📏 {km_val:.1f} km</div>
-    <div>⛰️ {elev_val:.0f} m D+</div>
-    <div>⏱️ {dur_val//3600}h {(dur_val%3600)//60:02d}m</div>
+  <div id="info-panel">
+    <div style="font-weight:700;margin-bottom:6px">{act_icon_safe} {act_name_safe}</div>
+    <div>&#128207; {km_val:.1f} km</div>
+    <div>&#9968; {elev_val:.0f} m D+</div>
+    <div>&#9201; {dur_val//3600}h {(dur_val%3600)//60:02d}m</div>
   </div>
 </div>
 <script>
@@ -3203,26 +3208,35 @@ map.addControl(new mapboxgl.ScaleControl(), 'bottom-right');
 map.on('load', () => {{
     {terrain_js}
 
-    // Sorgente segmenti colorati
     map.addSource('route-segments', {{
         type: 'geojson',
         data: {segments_json}
     }});
 
-    // Layer linea principale (ombra)
     map.addLayer({{
         id: 'route-shadow',
         type: 'line',
         source: 'route-segments',
         paint: {{
-            'line-color': 'rgba(0,0,0,0.4)',
+            'line-color': 'rgba(0,0,0,0.5)',
             'line-width': 8,
             'line-blur': 4,
-            'line-translate': [2, 2],
+            'line-translate': [2, 2]
         }}
     }});
 
-    // Layer linea colorata per pendenza
+    map.addLayer({{
+        id: 'route-glow',
+        type: 'line',
+        source: 'route-segments',
+        paint: {{
+            'line-color': ['get', 'color'],
+            'line-width': 14,
+            'line-opacity': 0.15,
+            'line-blur': 5
+        }}
+    }});
+
     map.addLayer({{
         id: 'route-line',
         type: 'line',
@@ -3230,57 +3244,37 @@ map.on('load', () => {{
         paint: {{
             'line-color': ['get', 'color'],
             'line-width': 4,
-            'line-opacity': 0.95,
+            'line-opacity': 1.0
         }},
         layout: {{ 'line-cap': 'round', 'line-join': 'round' }}
     }});
 
-    // Tracciato estruso (casing glow)
-    map.addLayer({{
-        id: 'route-glow',
-        type: 'line',
-        source: 'route-segments',
-        paint: {{
-            'line-color': ['get', 'color'],
-            'line-width': 12,
-            'line-opacity': 0.15,
-            'line-blur': 3,
-        }}
-    }});
-
-    // Marker partenza
     new mapboxgl.Marker({{ color: '#4CAF50', scale: 1.2 }})
         .setLngLat({start_json})
-        .setPopup(new mapboxgl.Popup().setHTML('<b>🟢 Partenza</b>'))
+        .setPopup(new mapboxgl.Popup().setHTML('<b>Partenza</b>'))
         .addTo(map);
 
-    // Marker arrivo
     new mapboxgl.Marker({{ color: '#F44336', scale: 1.2 }})
         .setLngLat({end_json})
-        .setPopup(new mapboxgl.Popup().setHTML('<b>🔴 Arrivo</b>'))
+        .setPopup(new mapboxgl.Popup().setHTML('<b>Arrivo</b>'))
         .addTo(map);
 
-    // Fly-to animato all'apertura
     map.flyTo({{
         center: [{center_lon}, {center_lat}],
-        zoom: 13,
-        pitch: 65,
-        bearing: -20,
-        duration: 2500,
-        essential: true
+        zoom: 13, pitch: 65, bearing: -20,
+        duration: 2000, essential: true
     }});
 }});
 
-// Hover tooltip
 const popup = new mapboxgl.Popup({{ closeButton: false, closeOnClick: false }});
 map.on('mouseenter', 'route-line', (e) => {{
     map.getCanvas().style.cursor = 'crosshair';
     const color = e.features[0].properties.color;
-    const slopeLabel = color === '#4CAF50' ? '< 25° — Sicuro' :
-                       color === '#FFEB3B' ? '25-30° — Attenzione' :
-                       color === '#FF9800' ? '30-35° — Rischio' : '> 35° — Pericolo';
+    const label = color === '#4CAF50' ? '< 25 gradi - Sicuro' :
+                  color === '#FFEB3B' ? '25-30 gradi - Attenzione' :
+                  color === '#FF9800' ? '30-35 gradi - Rischio' : '> 35 gradi - Pericolo';
     popup.setLngLat(e.lngLat)
-         .setHTML(`<div style='font-size:12px'><b>Pendenza:</b> ${{slopeLabel}}</div>`)
+         .setHTML('<div style="font-size:12px;padding:4px"><b>Pendenza:</b> ' + label + '</div>')
          .addTo(map);
 }});
 map.on('mouseleave', 'route-line', () => {{
@@ -3414,16 +3408,18 @@ map.on('mouseleave', 'route-line', () => {{
 <link href="https://api.mapbox.com/mapbox-gl-js/v3.3.0/mapbox-gl.css" rel="stylesheet"/>
 <script src="https://api.mapbox.com/mapbox-gl-js/v3.3.0/mapbox-gl.js"></script>
 <style>
-  body {{ margin:0; background:#0e1117; }}
-  #map {{ width:100%; height:560px; }}
-  .legend {{ position:absolute; bottom:30px; left:10px; background:rgba(0,0,0,0.8);
+  html, body {{ margin:0; padding:0; width:100%; height:100%; overflow:hidden; background:#0e1117; }}
+  #map-wrap {{ position:relative; width:100%; height:100%; }}
+  #map {{ position:absolute; top:0; left:0; width:100%; height:100%; }}
+  .legend {{ position:absolute; bottom:30px; left:10px; background:rgba(14,17,23,0.88);
              color:#fff; padding:10px 14px; border-radius:10px; font-size:12px;
-             font-family:sans-serif; line-height:2; }}
+             font-family:sans-serif; line-height:2; z-index:10; }}
   .legend-row {{ display:flex; align-items:center; gap:8px; }}
   .legend-dot {{ width:12px; height:12px; border-radius:50%; flex-shrink:0; }}
 </style>
 </head><body>
-<div id="map">
+<div id="map-wrap">
+  <div id="map"></div>
   <div class="legend"><b>Tracciati</b>{legend_html}</div>
 </div>
 <script>
@@ -3547,9 +3543,15 @@ map.on('load', () => {{
 """ if show_snowmap else ""
 
                     si_ski = get_sport_info(sel_ski["type"])
-                    dist_ski = sel_ski["distance"]/1000
-                    elev_ski = sel_ski.get("total_elevation_gain") or 0
-                    dur_ski  = int(sel_ski.get("moving_time") or 0)
+                    dist_ski  = sel_ski["distance"]/1000
+                    elev_ski  = sel_ski.get("total_elevation_gain") or 0
+                    dur_ski   = int(sel_ski.get("moving_time") or 0)
+                    ski_name  = (sel_ski.get('name','') or '')[:25]
+                    ski_icon  = si_ski['icon']
+
+                    aineva_row   = '<div class="legend-row"><div class="legend-dot" style="background:#FF9800"></div>AINEVA Valanghe</div>' if show_aineva else ''
+                    snow_row     = '<div class="legend-row"><div class="legend-dot" style="background:#2196F3"></div>OpenSnowMap</div>' if show_snowmap else ''
+                    slope_rows   = '<div style="margin-top:4px"><b>Pendenza</b></div><div class="legend-row"><div class="legend-dot" style="background:#4CAF50"></div>&lt;25° ok</div><div class="legend-row"><div class="legend-dot" style="background:#FFEB3B"></div>25-30°</div><div class="legend-row"><div class="legend-dot" style="background:#FF9800"></div>30-35°</div><div class="legend-row"><div class="legend-dot" style="background:#F44336"></div>&gt;35°</div>' if show_slope_av else ''
 
                     html_avalanche = f"""<!DOCTYPE html>
 <html><head>
@@ -3557,33 +3559,33 @@ map.on('load', () => {{
 <link href="https://api.mapbox.com/mapbox-gl-js/v3.3.0/mapbox-gl.css" rel="stylesheet"/>
 <script src="https://api.mapbox.com/mapbox-gl-js/v3.3.0/mapbox-gl.js"></script>
 <style>
-  body {{ margin:0; background:#0e1117; }}
-  #map {{ width:100%; height:600px; }}
+  html, body {{ margin:0; padding:0; width:100%; height:100%; overflow:hidden; background:#0e1117; }}
+  #map-wrap {{ position:relative; width:100%; height:100%; }}
+  #map {{ position:absolute; top:0; left:0; width:100%; height:100%; }}
   .legend-av {{
-    position:absolute; bottom:30px; left:10px; background:rgba(0,0,0,0.82);
+    position:absolute; bottom:30px; left:10px; background:rgba(14,17,23,0.88);
     color:#fff; padding:10px 14px; border-radius:10px; font-size:11px;
-    font-family:sans-serif; line-height:1.9;
+    font-family:sans-serif; line-height:1.9; z-index:10;
   }}
   .legend-row {{ display:flex; align-items:center; gap:7px; }}
   .legend-dot {{ width:11px; height:11px; border-radius:50%; flex-shrink:0; }}
   #info-ski {{
-    position:absolute; top:10px; right:10px; background:rgba(0,0,0,0.78);
+    position:absolute; top:10px; right:10px; background:rgba(14,17,23,0.88);
     color:#fff; padding:12px 16px; border-radius:10px; font-size:12px;
-    font-family:sans-serif;
+    font-family:sans-serif; z-index:10;
   }}
 </style>
 </head><body>
-<div id="map">
+<div id="map-wrap">
+  <div id="map"></div>
   <div class="legend-av">
-    <b>⛷️ Layers attivi</b>
-    {'<div class="legend-row"><div class="legend-dot" style="background:#FF9800"></div>AINEVA Valanghe</div>' if show_aineva else ''}
-    {'<div class="legend-row"><div class="legend-dot" style="background:#2196F3"></div>OpenSnowMap</div>' if show_snowmap else ''}
-    {'<div style="margin-top:4px"><b>📐 Pendenza</b></div><div class="legend-row"><div class="legend-dot" style="background:#4CAF50"></div>&lt;25° ok</div><div class="legend-row"><div class="legend-dot" style="background:#FFEB3B"></div>25-30°</div><div class="legend-row"><div class="legend-dot" style="background:#FF9800"></div>30-35°</div><div class="legend-row"><div class="legend-dot" style="background:#F44336"></div>&gt;35° ⚠️</div>' if show_slope_av else ''}
-    <div style="margin-top:6px;color:#666;font-size:10px">⚠️ Pendenza = stima GPS</div>
+    <b>Layers attivi</b>
+    {aineva_row}{snow_row}{slope_rows}
+    <div style="margin-top:6px;color:#666;font-size:10px">Pendenza = stima GPS</div>
   </div>
   <div id="info-ski">
-    <div style="font-weight:700;margin-bottom:4px">{si_ski['icon']} {sel_ski.get('name','')[:25]}</div>
-    <div>📏 {dist_ski:.1f} km | ⛰️ {elev_ski:.0f}m | ⏱️ {dur_ski//3600}h {(dur_ski%3600)//60:02d}m</div>
+    <div style="font-weight:700;margin-bottom:4px">{ski_icon} {ski_name}</div>
+    <div>{dist_ski:.1f} km | {elev_ski:.0f}m D+ | {dur_ski//3600}h {(dur_ski%3600)//60:02d}m</div>
   </div>
 </div>
 <script>
@@ -3599,7 +3601,6 @@ map.addControl(new mapboxgl.FullscreenControl(), 'top-left');
 map.addControl(new mapboxgl.ScaleControl(), 'bottom-right');
 
 map.on('load', () => {{
-    // Terrain 3D sempre attivo per scialpinismo
     map.addSource('mapbox-dem', {{
         'type': 'raster-dem',
         'url': 'mapbox://mapbox.mapbox-terrain-dem-v1',
@@ -3614,7 +3615,6 @@ map.on('load', () => {{
     {aineva_js}
     {snowmap_js}
 
-    // Tracciato
     map.addSource('ski-route', {{ type: 'geojson', data: {seg_ski_json} }});
     map.addLayer({{
         id: 'ski-shadow', type: 'line', source: 'ski-route',
@@ -3635,16 +3635,16 @@ map.on('load', () => {{
 
     new mapboxgl.Marker({{ color: '#4CAF50', scale: 1.3 }})
         .setLngLat({start_ski_j})
-        .setPopup(new mapboxgl.Popup().setHTML('<b>🟢 Partenza</b>'))
+        .setPopup(new mapboxgl.Popup().setHTML('<b>Partenza</b>'))
         .addTo(map);
     new mapboxgl.Marker({{ color: '#F44336', scale: 1.3 }})
         .setLngLat({end_ski_j})
-        .setPopup(new mapboxgl.Popup().setHTML('<b>🔴 Arrivo</b>'))
+        .setPopup(new mapboxgl.Popup().setHTML('<b>Arrivo</b>'))
         .addTo(map);
 
     map.flyTo({{
         center: [{clon_ski}, {clat_ski}],
-        zoom: 13, pitch: 70, duration: 2500
+        zoom: 13, pitch: 70, duration: 2000
     }});
 }});
 </script></body></html>"""
