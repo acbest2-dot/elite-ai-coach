@@ -24,25 +24,33 @@ def get_secret(key):
 CLIENT_ID     = get_secret("STRAVA_CLIENT_ID")
 CLIENT_SECRET = get_secret("STRAVA_CLIENT_SECRET")
 GEMINI_KEY    = get_secret("GOOGLE_API_KEY")
+GROK_KEY      = get_secret("GROK_API_KEY") or get_secret("XAI_API_KEY") or ""
 MAPBOX_TOKEN  = get_secret("MAPBOX_TOKEN") or ""
 MAPBOX_MONTHLY_LIMIT  = 50_000   # Free tier ufficiale Mapbox GL JS
 MAPBOX_DAILY_SOFT_CAP = 200      # Soglia soft giornaliera (50k/30gg ≈ 1666/gg, usiamo 200 come extra-safe)
 MAPBOX_SESSION_CAP    = 200      # Max map load per sessione Streamlit
 
-# ── Inizializzazione AI — supporta sia google-genai (nuova) che google-generativeai (vecchia) ──
+# ── Inizializzazione AI — Grok (xAI) + Gemini (Google) ──
 _ai_client   = None
-_ai_sdk_mode = None   # "new" | "old" | None
+_ai_sdk_mode = None   # "new" | "old" | "grok" | None
 
-if GEMINI_KEY:
-    # Prima prova la nuova SDK google-genai (consigliata per nuovi account)
+# Grok via OpenAI-compatible endpoint — ha priorità se la key è presente
+if GROK_KEY:
+    try:
+        from openai import OpenAI as _OpenAI
+        _ai_client   = _OpenAI(api_key=GROK_KEY, base_url="https://api.x.ai/v1")
+        _ai_sdk_mode = "grok"
+    except ImportError:
+        pass  # openai non installato, prova Gemini
+
+# Gemini — usato se Grok non disponibile
+if _ai_sdk_mode is None and GEMINI_KEY:
     try:
         import google.genai as genai_new
         _ai_client   = genai_new.Client(api_key=GEMINI_KEY)
         _ai_sdk_mode = "new"
     except ImportError:
         pass
-
-    # Fallback: vecchia SDK google-generativeai
     if _ai_sdk_mode is None:
         try:
             import google.generativeai as genai_old
@@ -55,10 +63,22 @@ if GEMINI_KEY:
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_available_models(api_key: str) -> list[str]:
     """
-    Scopre i modelli realmente disponibili per questa API key.
-    Usa la nuova SDK se disponibile, altrimenti la vecchia.
-    Ritorna sempre almeno un modello funzionante.
+    Scopre modelli disponibili. Per Grok usa lista statica aggiornata.
+    Per Gemini fa auto-discovery dalla API key.
     """
+    # ── Grok (xAI) ──────────────────────────────────
+    if _ai_sdk_mode == "grok":
+        return [
+            "grok-3",
+            "grok-3-fast",
+            "grok-3-mini",
+            "grok-3-mini-fast",
+            "grok-2-1212",
+            "grok-2-vision-1212",
+            "grok-beta",
+        ]
+
+    # ── Gemini ───────────────────────────────────────
     models_found = []
     if _ai_sdk_mode == "new":
         try:
@@ -78,16 +98,12 @@ def get_available_models(api_key: str) -> list[str]:
         except Exception:
             pass
 
-    # Ordine preferito: 2.0 prima, poi 1.5
     preferred = [
         "gemini-2.0-flash", "gemini-2.0-flash-lite", "gemini-2.0-flash-exp",
         "gemini-1.5-flash", "gemini-1.5-flash-8b", "gemini-1.5-pro",
     ]
-    # Prima i preferiti trovati, poi tutto il resto scoperto
     ordered = [m for m in preferred if m in models_found]
     ordered += [m for m in models_found if m not in ordered]
-
-    # Se auto-discovery vuota, usa fallback sicuro
     return ordered if ordered else ["gemini-2.0-flash", "gemini-1.5-flash"]
 
 st.set_page_config(page_title="Elite AI Coach Pro", page_icon="🏆", layout="wide")
@@ -789,7 +805,10 @@ def draw_map(encoded_polyline, height=300):
         return None
     try:
         points = polyline.decode(encoded_polyline)
-        m = folium.Map(location=points[0], zoom_start=13, tiles="CartoDB positron")
+        m = folium.Map(
+            location=points[0], zoom_start=13, tiles="CartoDB positron",
+            scrollWheelZoom=True,   # ← abilita zoom con rotella mouse
+        )
         folium.PolyLine(points, color="#e94560", weight=4, opacity=0.9).add_to(m)
         folium.CircleMarker(points[0],  radius=6, color="#4CAF50", fill=True).add_to(m)
         folium.CircleMarker(points[-1], radius=6, color="#F44336", fill=True).add_to(m)
@@ -1142,6 +1161,18 @@ def parse_ringconn_sleep(file) -> pd.DataFrame:
     return df_s.sort_values("date").reset_index(drop=True)
 
 
+
+def parse_ringconn_activity(file) -> pd.DataFrame:
+    """Parsa il CSV Activity RingConn: Date, Steps, Calories(kcal)."""
+    df_a = pd.read_csv(file)
+    df_a.columns = [c.strip() for c in df_a.columns]
+    df_a["date"]     = pd.to_datetime(df_a["Date"], errors="coerce")
+    df_a["steps"]    = pd.to_numeric(df_a.get("Steps", pd.Series(dtype=float)), errors="coerce").fillna(0).astype(int)
+    df_a["kcal_day"] = pd.to_numeric(df_a.get("Calories(kcal)", pd.Series(dtype=float)), errors="coerce").fillna(0).astype(int)
+    df_a = df_a.dropna(subset=["date"]).sort_values("date").reset_index(drop=True)
+    return df_a[["date","steps","kcal_day"]]
+
+
 def calc_readiness(vitals_row, sleep_row, tsb: float) -> dict:
     scores = {}
     hrv = vitals_row.get("hrv_avg") if vitals_row is not None else None
@@ -1362,6 +1393,7 @@ for key, val in {
     "sport_filter":       None,
     "rc_vitals":          None,    # DataFrame RingConn Vital Signs
     "rc_sleep":           None,    # DataFrame RingConn Sleep
+    "rc_activity":        None,    # DataFrame RingConn Activity (passi + kcal giornalieri)
     "activities_cache":   [],      # storico attività Strava (incrementale)
     "activities_last_ts": 0,       # unix timestamp ultima attività scaricata
     "activities_token":   "",      # fingerprint token per invalidare se cambia utente
@@ -1493,8 +1525,9 @@ if token_ok:
     status_label, status_color = tsb_status(current_tsb)
 
     # ---- RINGCONN — shorthand + Readiness Score ----
-    rc_vitals = st.session_state.rc_vitals   # None o DataFrame
-    rc_sleep  = st.session_state.rc_sleep    # None o DataFrame
+    rc_vitals    = st.session_state.rc_vitals    # None o DataFrame
+    rc_sleep     = st.session_state.rc_sleep     # None o DataFrame
+    rc_activity  = st.session_state.rc_activity  # None o DataFrame (passi + kcal)
 
     # Readiness Score giornaliero (oggi o ultimo disponibile)
     today_str = datetime.now().strftime("%Y-%m-%d")
@@ -1557,19 +1590,34 @@ if token_ok:
         if "sel_model" in st.session_state and st.session_state.sel_model in all_models:
             default_idx = all_models.index(st.session_state.sel_model)
 
-        sdk_badge = "🆕 google-genai" if _ai_sdk_mode == "new" else "🔄 generativeai" if _ai_sdk_mode == "old" else "⚠️ SDK mancante"
+        if _ai_sdk_mode == "grok":
+            sdk_badge = "⚡ xAI Grok"
+        elif _ai_sdk_mode == "new":
+            sdk_badge = "🆕 Gemini (google-genai)"
+        elif _ai_sdk_mode == "old":
+            sdk_badge = "🔄 Gemini (generativeai)"
+        else:
+            sdk_badge = "⚠️ Nessun provider AI"
+
         sel_model = st.selectbox(
-            f"🧠 Modello AI:", all_models, index=default_idx,
-            help=f"SDK: {sdk_badge}. Modelli scoperti dalla tua API key. 2.0=nuovi account, 1.5=account precedenti."
+            "🧠 Modello AI:", all_models, index=default_idx,
+            help=f"Provider: {sdk_badge}. Imposta GROK_API_KEY per Grok, GOOGLE_API_KEY per Gemini."
         )
         st.session_state.sel_model = sel_model
         st.caption(sdk_badge)
 
         def ai_generate(prompt: str) -> str:
-            """Wrapper unificato — funziona sia con nuova SDK google-genai che vecchia google-generativeai."""
+            """Wrapper unificato — Grok (xAI) o Gemini (Google)."""
             if _ai_sdk_mode is None:
-                raise RuntimeError("Nessuna SDK Gemini. Controlla requirements.txt.")
-            if _ai_sdk_mode == "new":
+                raise RuntimeError("Nessun provider AI configurato. Aggiungi GROK_API_KEY o GOOGLE_API_KEY nei Secrets.")
+            if _ai_sdk_mode == "grok":
+                resp = _ai_client.chat.completions.create(
+                    model=sel_model,
+                    messages=[{"role": "user", "content": prompt}],
+                    max_tokens=1500,
+                )
+                return resp.choices[0].message.content
+            elif _ai_sdk_mode == "new":
                 response = _ai_client.models.generate_content(
                     model=sel_model,
                     contents=prompt,
@@ -1593,8 +1641,9 @@ if token_ok:
             st.success(f"✅ {len(st.session_state.rc_vitals)} giorni caricati")
         with st.expander("📂 Carica CSV" if not rc_has_data else "🔄 Aggiorna CSV"):
             st.caption("Esporta dall'app RingConn: Profilo → Impostazioni → Data Export")
-            f_vitals = st.file_uploader("Vital_Signs CSV", type="csv", key="up_vitals")
-            f_sleep  = st.file_uploader("Sleep CSV",       type="csv", key="up_sleep")
+            f_vitals   = st.file_uploader("Vital_Signs CSV",  type="csv", key="up_vitals")
+            f_sleep    = st.file_uploader("Sleep CSV",          type="csv", key="up_sleep")
+            f_activity = st.file_uploader("Activity CSV (passi)", type="csv", key="up_activity")
             if f_vitals:
                 try:
                     st.session_state.rc_vitals = parse_ringconn_vitals(f_vitals)
@@ -1607,10 +1656,17 @@ if token_ok:
                     st.success(f"✅ Sleep: {len(st.session_state.rc_sleep)} sessioni")
                 except Exception as e:
                     st.error(f"Errore: {e}")
-            if st.session_state.rc_vitals is not None or st.session_state.rc_sleep is not None:
+            if f_activity:
+                try:
+                    st.session_state.rc_activity = parse_ringconn_activity(f_activity)
+                    st.success(f"✅ Activity: {len(st.session_state.rc_activity)} giorni")
+                except Exception as e:
+                    st.error(f"Errore: {e}")
+            if any(st.session_state.get(k) is not None for k in ["rc_vitals","rc_sleep","rc_activity"]):
                 if st.button("🗑️ Rimuovi dati RingConn", use_container_width=True):
-                    st.session_state.rc_vitals = None
-                    st.session_state.rc_sleep  = None
+                    st.session_state.rc_vitals   = None
+                    st.session_state.rc_sleep    = None
+                    st.session_state.rc_activity = None
                     st.rerun()
 
         st.divider()
@@ -1989,8 +2045,8 @@ if token_ok:
         st.divider()
 
         # ── Tabs principali ──
-        tab_hrv, tab_sleep, tab_corr, tab_ai = st.tabs([
-            "❤️ HRV & Vitali", "💤 Sonno", "🔗 Correlazione Performance", "🤖 Analisi AI"
+        tab_hrv, tab_sleep, tab_steps, tab_corr, tab_ai = st.tabs([
+            "❤️ HRV & Vitali", "💤 Sonno", "👟 Passi & Attività", "🔗 Correlazione Performance", "🤖 Analisi AI"
         ])
 
         # ────────────────────────────────────────────
@@ -2181,6 +2237,131 @@ if token_ok:
                         yaxis=dict(gridcolor="rgba(255,255,255,0.05)", title="notti"),
                     )
                     st.plotly_chart(fig_sh, use_container_width=True)
+
+        # ────────────────────────────────────────────
+        # TAB PASSI & ATTIVITÀ GIORNALIERA
+        # ────────────────────────────────────────────
+        with tab_steps:
+            st.markdown("### 👟 Passi & Attività Giornaliera")
+            rc_act = st.session_state.rc_activity
+            if rc_act is None:
+                st.info("💍 Carica il file **Activity CSV** di RingConn (Profilo → Impostazioni → Data Export → Activity) per vedere i dati passi.")
+            else:
+                today_d = pd.Timestamp(datetime.now().date())
+                rc7     = rc_act[rc_act["date"] >= today_d - timedelta(days=7)]
+                rc30    = rc_act[rc_act["date"] >= today_d - timedelta(days=30)]
+                last_day = rc_act.dropna(subset=["steps"]).iloc[-1]
+
+                k1, k2, k3, k4, k5 = st.columns(5)
+                k1.metric("Passi ieri",      f"{int(last_day['steps']):,}",
+                          delta="✅ ok" if last_day["steps"] >= 8000 else "📉 sotto target")
+                k2.metric("Media 7gg",       f"{int(rc7['steps'].mean()):,}")
+                k3.metric("Media 30gg",      f"{int(rc30['steps'].mean()):,}")
+                k4.metric("Giorno top",      f"{int(rc_act['steps'].max()):,}",
+                          delta=rc_act.loc[rc_act["steps"].idxmax(), "date"].strftime("%d/%m"))
+                k5.metric("TDEE medio 7gg",  f"{int(rc7['kcal_day'].mean()):,} kcal")
+
+                step_target = 8000
+                pct_ok = int((rc30["steps"] >= step_target).sum() / max(len(rc30), 1) * 100)
+                lbl = ("✅ Ottima mobilità di base." if pct_ok >= 70 else
+                       "🟡 Cerca di muoverti di più nei giorni di recupero." if pct_ok >= 40 else
+                       "🔴 Attività di base insufficiente. Aggiungi passeggiate nei giorni di riposo.")
+                st.markdown(f"""
+                <div style="background:rgba(76,175,80,0.08);border-left:3px solid #4CAF50;
+                            border-radius:0 10px 10px 0;padding:10px 16px;margin:8px 0">
+                    <b>{pct_ok}%</b> dei giorni (ultimi 30) hai raggiunto i <b>{step_target:,} passi target</b>. {lbl}
+                </div>""", unsafe_allow_html=True)
+
+                st.markdown("##### Passi giornalieri — ultimi 30 giorni")
+                rc30_p = rc30.copy()
+                rc30_p["color"] = rc30_p["steps"].apply(
+                    lambda s: "#4CAF50" if s >= 10000 else "#FF9800" if s >= 6000 else "#F44336"
+                )
+                fig_steps = go.Figure(go.Bar(
+                    x=rc30_p["date"], y=rc30_p["steps"],
+                    marker_color=rc30_p["color"].tolist(), opacity=0.85,
+                    text=rc30_p["steps"].apply(lambda x: f"{int(x/1000):.0f}k"),
+                    textposition="outside",
+                ))
+                fig_steps.add_hline(y=step_target, line_dash="dash",
+                                     line_color="rgba(255,255,255,0.4)",
+                                     annotation_text=f"Target {step_target:,}")
+                fig_steps.add_hline(y=10000, line_dash="dot",
+                                     line_color="rgba(76,175,80,0.5)",
+                                     annotation_text="10k")
+                fig_steps.update_layout(
+                    paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                    height=260, margin=dict(l=0,r=0,t=20,b=0),
+                    xaxis=dict(gridcolor="rgba(255,255,255,0.05)", tickformat="%d/%m"),
+                    yaxis=dict(gridcolor="rgba(255,255,255,0.05)", title="Passi"),
+                    showlegend=False,
+                )
+                st.plotly_chart(fig_steps, use_container_width=True)
+
+                # Correlazione passi-riposo → HRV giorno dopo
+                if rc_vitals is not None and not rc_vitals.empty:
+                    st.markdown("##### 🔗 Passi nei giorni di riposo → HRV del giorno dopo")
+                    strava_days = set(df["start_date"].dt.strftime("%Y-%m-%d").tolist())
+                    rest_rows   = []
+                    for _, srow in rc_act.iterrows():
+                        d_str  = srow["date"].strftime("%Y-%m-%d")
+                        if d_str in strava_days or srow["steps"] <= 0:
+                            continue
+                        next_d = (srow["date"] + timedelta(days=1)).strftime("%Y-%m-%d")
+                        match  = rc_vitals[rc_vitals["date"].dt.strftime("%Y-%m-%d") == next_d]
+                        if not match.empty and pd.notna(match.iloc[0]["hrv_avg"]):
+                            rest_rows.append({"date": d_str,
+                                              "steps": srow["steps"],
+                                              "hrv_next": match.iloc[0]["hrv_avg"]})
+                    if len(rest_rows) >= 5:
+                        cdf    = pd.DataFrame(rest_rows)
+                        xarr   = cdf["steps"].values.astype(float)
+                        yarr   = cdf["hrv_next"].values.astype(float)
+                        xm, ym = xarr.mean(), yarr.mean()
+                        sl     = ((xarr-xm)*(yarr-ym)).sum() / max(((xarr-xm)**2).sum(), 1e-9)
+                        yfit   = xarr * sl + (ym - sl*xm)
+                        r_val  = float(np.corrcoef(xarr, yarr)[0, 1])
+                        fig_cs = go.Figure()
+                        fig_cs.add_trace(go.Scatter(
+                            x=xarr, y=yarr, mode="markers",
+                            marker=dict(color="#4CAF50", size=8, opacity=0.75),
+                            text=cdf["date"],
+                            hovertemplate="%{text}<br>Passi: %{x}<br>HRV+1gg: %{y} ms",
+                            name="Giorni di riposo",
+                        ))
+                        fig_cs.add_trace(go.Scatter(
+                            x=xarr, y=yfit, mode="lines",
+                            line=dict(color="#FF9800", dash="dash"),
+                            name=f"Trend (r={r_val:.2f})",
+                        ))
+                        fig_cs.update_layout(
+                            paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                            height=240, margin=dict(l=0,r=0,t=10,b=0),
+                            xaxis=dict(gridcolor="rgba(255,255,255,0.05)", title="Passi giorno di riposo"),
+                            yaxis=dict(gridcolor="rgba(255,255,255,0.05)", title="HRV giorno dopo (ms)"),
+                            legend=dict(orientation="h", y=1.1),
+                        )
+                        st.plotly_chart(fig_cs, use_container_width=True)
+                        insight = ("camminare nei giorni di riposo tende a migliorare il recupero HRV." if r_val > 0.3 else
+                                   "i passi nei giorni di riposo non mostrano correlazione chiara con l'HRV successivo.")
+                        st.caption(f"r={r_val:.2f} — {insight}")
+                    else:
+                        st.info("Servono almeno 5 giorni di riposo con HRV per questa analisi.")
+
+                st.markdown("##### 🔥 TDEE stimato (kcal totali giornata)")
+                fig_tdee = go.Figure(go.Scatter(
+                    x=rc30_p["date"], y=rc30_p["kcal_day"],
+                    fill="tozeroy", line=dict(color="#e94560", width=2),
+                    fillcolor="rgba(233,69,96,0.1)",
+                ))
+                fig_tdee.update_layout(
+                    paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                    height=200, margin=dict(l=0,r=0,t=10,b=0),
+                    xaxis=dict(gridcolor="rgba(255,255,255,0.05)", tickformat="%d/%m"),
+                    yaxis=dict(gridcolor="rgba(255,255,255,0.05)", title="kcal"),
+                    showlegend=False,
+                )
+                st.plotly_chart(fig_tdee, use_container_width=True)
 
         # ────────────────────────────────────────────
         # TAB CORRELAZIONE SONNO → PERFORMANCE
@@ -4694,143 +4875,362 @@ map.on('draw.delete', updateStats);
     elif menu == "📅 Calendario":
         st.markdown("## 📅 Calendario Allenamenti")
 
-        # Filtri sport a pulsanti
+        # ── State per giorno selezionato ──
+        if "cal_selected_day" not in st.session_state:
+            st.session_state.cal_selected_day = None
+        if "cal_view" not in st.session_state:
+            st.session_state.cal_view = "Mese"
+        if "cal_month" not in st.session_state:
+            st.session_state.cal_month = datetime.now().month
+        if "cal_year" not in st.session_state:
+            st.session_state.cal_year = datetime.now().year
+
+        # ── Filtri sport ──
         all_sports = sorted(df["type"].unique().tolist())
         if st.session_state.sport_filter is None:
             st.session_state.sport_filter = set(all_sports)
 
         st.markdown("**Filtra per sport:**")
-        btn_cols = st.columns(min(len(all_sports), 8))
+        btn_cols = st.columns(min(len(all_sports) + 2, 10))
         for i, sport in enumerate(all_sports):
             si = get_sport_info(sport)
             is_active = sport in st.session_state.sport_filter
-            label = f"{si['icon']} {si['label']}"
-            with btn_cols[i % len(btn_cols)]:
+            with btn_cols[i % (len(btn_cols) - 2)]:
                 if st.button(
-                    label,
-                    key=f"sport_btn_{sport}",
+                    f"{si['icon']} {si['label']}",
+                    key=f"cal_sport_{sport}",
                     type="primary" if is_active else "secondary",
                     use_container_width=True,
                 ):
                     sf = st.session_state.sport_filter
-                    if sport in sf:
-                        sf.discard(sport)
-                    else:
-                        sf.add(sport)
+                    if sport in sf: sf.discard(sport)
+                    else:           sf.add(sport)
                     st.rerun()
+        c_all_c, c_none_c, _ = st.columns([1, 1, 6])
+        with c_all_c:
+            if st.button("✅ Tutti",  key="cal_all",  use_container_width=True):
+                st.session_state.sport_filter = set(all_sports); st.rerun()
+        with c_none_c:
+            if st.button("❌ Nessuno", key="cal_none", use_container_width=True):
+                st.session_state.sport_filter = set(); st.rerun()
 
-        col_all, col_none, _ = st.columns([1, 1, 5])
-        with col_all:
-            if st.button("✅ Tutti", use_container_width=True):
-                st.session_state.sport_filter = set(all_sports)
-                st.rerun()
-        with col_none:
-            if st.button("❌ Nessuno", use_container_width=True):
-                st.session_state.sport_filter = set()
-                st.rerun()
-
-        df_filtered = df[df["type"].isin(st.session_state.sport_filter)]
+        df_filtered = df[df["type"].isin(st.session_state.sport_filter)].copy()
 
         st.divider()
 
-        # Calendario + statistiche mensili
-        col_cal, col_stats = st.columns([3, 1])
+        # ── Vista Settimana / Mese / Anno ──
+        view_c1, view_c2, view_c3, nav_c1, nav_c2, nav_c3 = st.columns([1, 1, 1, 1, 2, 1])
+        with view_c1:
+            if st.button("📅 Settimana", type="primary" if st.session_state.cal_view == "Settimana" else "secondary", use_container_width=True):
+                st.session_state.cal_view = "Settimana"; st.rerun()
+        with view_c2:
+            if st.button("🗓️ Mese", type="primary" if st.session_state.cal_view == "Mese" else "secondary", use_container_width=True):
+                st.session_state.cal_view = "Mese"; st.rerun()
+        with view_c3:
+            if st.button("📆 Anno", type="primary" if st.session_state.cal_view == "Anno" else "secondary", use_container_width=True):
+                st.session_state.cal_view = "Anno"; st.rerun()
 
-        with col_cal:
-            events = []
-            for _, row in df_filtered.iterrows():
-                si = get_sport_info(row["type"])
-                events.append({
-                    "title":           f"{si['icon']} {row['distance']/1000:.1f}km",
-                    "start":           row["start_date"].isoformat(),
-                    "backgroundColor": si["color"],
-                    "borderColor":     si["color"],
-                    "textColor":       "#ffffff",
-                })
-            calendar(events=events, options={
-                "initialView": "dayGridMonth",
-                "headerToolbar": {"left": "prev,next today", "center": "title", "right": "dayGridMonth,listWeek"},
-                "height": 550,
-            })
-
-        with col_stats:
-            st.markdown("#### 📊 Questo mese")
-            now      = datetime.now()
-            df_month = df_filtered[
-                (df_filtered["start_date"].dt.month == now.month) &
-                (df_filtered["start_date"].dt.year  == now.year)
-            ]
-            st.metric("Sessioni",    len(df_month))
-            st.metric("Km totali",   f"{df_month['distance'].sum()/1000:.1f}")
-            st.metric("Ore totali",  f"{df_month['moving_time'].sum()/3600:.1f}")
-            st.metric("TSS mese",    f"{df_month['tss'].sum():.0f}")
-            st.metric("Dislivello",  f"{(df_month['total_elevation_gain'].sum() or 0):.0f} m")
-
-            st.markdown("#### Sport praticati")
-            sport_m = df_month["type"].value_counts()
-            for sp, cnt in sport_m.items():
-                si = get_sport_info(sp)
-                st.markdown(f"{si['icon']} **{si['label']}**: {cnt}")
-
-            st.divider()
-            st.markdown("#### 📅 Mese precedente")
-            prev_month = now.month - 1 if now.month > 1 else 12
-            prev_year  = now.year if now.month > 1 else now.year - 1
-            df_prev = df_filtered[
-                (df_filtered["start_date"].dt.month == prev_month) &
-                (df_filtered["start_date"].dt.year  == prev_year)
-            ]
-            st.metric("Sessioni",   len(df_prev))
-            st.metric("Km totali",  f"{df_prev['distance'].sum()/1000:.1f}")
-            st.metric("Ore totali", f"{df_prev['moving_time'].sum()/3600:.1f}")
+        # Navigazione mese/anno
+        with nav_c1:
+            if st.button("◀", key="cal_prev", use_container_width=True):
+                if st.session_state.cal_view == "Anno":
+                    st.session_state.cal_year -= 1
+                else:
+                    if st.session_state.cal_month == 1:
+                        st.session_state.cal_month = 12
+                        st.session_state.cal_year -= 1
+                    else:
+                        st.session_state.cal_month -= 1
+                st.session_state.cal_selected_day = None
+                st.rerun()
+        with nav_c2:
+            if st.session_state.cal_view == "Anno":
+                st.markdown(f"<div style='text-align:center;font-size:18px;font-weight:700;padding:6px'>{st.session_state.cal_year}</div>", unsafe_allow_html=True)
+            else:
+                import calendar as _cal
+                mname = _cal.month_name[st.session_state.cal_month]
+                st.markdown(f"<div style='text-align:center;font-size:18px;font-weight:700;padding:6px'>{mname} {st.session_state.cal_year}</div>", unsafe_allow_html=True)
+        with nav_c3:
+            if st.button("▶", key="cal_next", use_container_width=True):
+                if st.session_state.cal_view == "Anno":
+                    st.session_state.cal_year += 1
+                else:
+                    if st.session_state.cal_month == 12:
+                        st.session_state.cal_month = 1
+                        st.session_state.cal_year += 1
+                    else:
+                        st.session_state.cal_month += 1
+                st.session_state.cal_selected_day = None
+                st.rerun()
 
         st.divider()
-        st.markdown("#### 📋 Lista Attività")
 
-        # Heatmap consistenza annuale
+        # ── Funzione helper: dots per un giorno ──
+        def day_dots_html(day_acts, max_dots=5):
+            """Genera pallini colorati per le attività di un giorno."""
+            dots = ""
+            for _, r in day_acts.head(max_dots).iterrows():
+                si  = get_sport_info(r["type"])
+                tss = r.get("tss", 0) or 0
+                sz  = max(8, min(16, int(tss / 6) + 8))  # size 8-16px proporzionale al TSS
+                dots += (f'<div title="{si['label']} — {r['distance']/1000:.1f}km — TSS {tss:.0f}" ' +
+                         f'style="width:{sz}px;height:{sz}px;border-radius:50%;background:{si['color']};' +
+                         f'display:inline-block;margin:1px;cursor:pointer"></div>')
+            if len(day_acts) > max_dots:
+                dots += f'<div style="font-size:9px;color:#888;display:inline">+{len(day_acts)-max_dots}</div>'
+            return dots
+
+        # ── Raggruppa attività per data ──
+        df_filtered["_date_str"] = df_filtered["start_date"].dt.strftime("%Y-%m-%d")
+        acts_by_day = {}
+        for dstr, grp in df_filtered.groupby("_date_str"):
+            acts_by_day[dstr] = grp
+
+        # ════════════════════════════════════
+        # VISTA MESE — griglia 7 colonne
+        # ════════════════════════════════════
+        if st.session_state.cal_view in ("Mese", "Settimana"):
+            import calendar as _cal2
+            y = st.session_state.cal_year
+            m = st.session_state.cal_month
+
+            if st.session_state.cal_view == "Settimana":
+                # Settimana corrente che include oggi
+                today_dt = datetime.now().date()
+                week_start = today_dt - timedelta(days=today_dt.weekday())  # lunedì
+                days_to_show = [week_start + timedelta(days=i) for i in range(7)]
+                weeks_list   = [days_to_show]
+                y = today_dt.year
+                m = today_dt.month
+            else:
+                # Mese intero
+                cal_obj   = _cal2.Calendar(firstweekday=0)
+                month_days = cal_obj.monthdatescalendar(y, m)
+                weeks_list = month_days
+
+            # Header giorni settimana
+            day_names = ["Lun", "Mar", "Mer", "Gio", "Ven", "Sab", "Dom"]
+            header_html = '<div style="display:grid;grid-template-columns:repeat(7,1fr);gap:4px;margin-bottom:4px">'
+            for dn in day_names:
+                header_html += f'<div style="text-align:center;font-size:11px;color:#888;font-weight:600">{dn}</div>'
+            header_html += "</div>"
+            st.markdown(header_html, unsafe_allow_html=True)
+
+            # Griglia giorni
+            for week in weeks_list:
+                cols_week = st.columns(7)
+                for ci, day in enumerate(week):
+                    with cols_week[ci]:
+                        dstr     = day.strftime("%Y-%m-%d")
+                        is_today = (day == datetime.now().date())
+                        in_month = (day.month == m)
+                        day_acts = acts_by_day.get(dstr, pd.DataFrame())
+                        selected = (st.session_state.cal_selected_day == dstr)
+
+                        # Colore sfondo
+                        if selected:
+                            bg = "rgba(233,69,96,0.25)"
+                            border = "2px solid #e94560"
+                        elif is_today:
+                            bg = "rgba(33,150,243,0.15)"
+                            border = "1px solid #2196F355"
+                        elif not in_month:
+                            bg = "transparent"
+                            border = "1px solid transparent"
+                        elif not isinstance(day_acts, pd.DataFrame) or day_acts.empty:
+                            bg = "rgba(255,255,255,0.02)"
+                            border = "1px solid rgba(255,255,255,0.06)"
+                        else:
+                            bg = "rgba(255,255,255,0.04)"
+                            border = "1px solid rgba(255,255,255,0.1)"
+
+                        num_color = "#e94560" if is_today else "#fff" if in_month else "#444"
+                        dots_html = day_dots_html(day_acts) if not isinstance(day_acts, pd.DataFrame) or not day_acts.empty else ""
+
+                        cell_html = f"""
+                        <div style="background:{bg};border:{border};border-radius:10px;
+                                    padding:6px 4px 4px;min-height:60px;text-align:center">
+                            <div style="font-size:13px;font-weight:700;color:{num_color}">{day.day}</div>
+                            <div style="margin-top:3px;display:flex;flex-wrap:wrap;justify-content:center;gap:2px">
+                                {dots_html}
+                            </div>
+                        </div>"""
+                        st.markdown(cell_html, unsafe_allow_html=True)
+
+                        # Bottone invisibile sovrapposto per click
+                        if not isinstance(day_acts, pd.DataFrame) or not day_acts.empty:
+                            if st.button(f"{day.day}", key=f"cal_day_{dstr}",
+                                         use_container_width=True,
+                                         help=f"{len(day_acts)} attività il {dstr}"):
+                                if st.session_state.cal_selected_day == dstr:
+                                    st.session_state.cal_selected_day = None
+                                else:
+                                    st.session_state.cal_selected_day = dstr
+                                st.rerun()
+
+        # ════════════════════════════════════
+        # VISTA ANNO — 4 righe × 3 mesi
+        # ════════════════════════════════════
+        elif st.session_state.cal_view == "Anno":
+            import calendar as _cal3
+            y = st.session_state.cal_year
+            months_per_row = 3
+            months = list(range(1, 13))
+
+            for row_start in range(0, 12, months_per_row):
+                row_months = months[row_start:row_start + months_per_row]
+                mcols = st.columns(months_per_row)
+                for mi, month_num in enumerate(row_months):
+                    with mcols[mi]:
+                        mname = _cal3.month_name[month_num]
+                        st.markdown(f"<div style='font-size:13px;font-weight:700;color:#aaa;margin-bottom:4px'>{mname}</div>",
+                                    unsafe_allow_html=True)
+
+                        cal_obj   = _cal3.Calendar(firstweekday=0)
+                        month_days = cal_obj.monthdatescalendar(y, month_num)
+
+                        for week in month_days:
+                            wcols = st.columns(7)
+                            for ci2, day in enumerate(week):
+                                with wcols[ci2]:
+                                    dstr     = day.strftime("%Y-%m-%d")
+                                    in_month = (day.month == month_num)
+                                    day_acts = acts_by_day.get(dstr, pd.DataFrame())
+                                    is_today = (day == datetime.now().date())
+
+                                    if not in_month:
+                                        st.markdown('<div style="height:20px"></div>', unsafe_allow_html=True)
+                                        continue
+
+                                    if not isinstance(day_acts, pd.DataFrame) or day_acts.empty:
+                                        dot_html = f'<div title="{dstr}" style="width:8px;height:8px;border-radius:50%;background:#1e1e2e;border:1px solid #333;margin:auto"></div>'
+                                        st.markdown(dot_html, unsafe_allow_html=True)
+                                    else:
+                                        # Mostra un solo dot grande colorato per il tipo principale
+                                        top_sport = day_acts["type"].value_counts().index[0]
+                                        si_top    = get_sport_info(top_sport)
+                                        n_acts    = len(day_acts)
+                                        sz        = 10 if n_acts == 1 else 13
+                                        sel_a     = (st.session_state.cal_selected_day == dstr)
+                                        border_a  = "2px solid #e94560" if sel_a else "none"
+                                        dot_html  = (f'<div title="{dstr}: {n_acts} attività"' +
+                                                     f' style="width:{sz}px;height:{sz}px;border-radius:50%;"' +
+                                                     f'background:{si_top['color']};border:{border_a};' +
+                                                     f'cursor:pointer;margin:auto"></div>')
+                                        st.markdown(dot_html, unsafe_allow_html=True)
+                                        if st.button("·", key=f"yr_day_{dstr}", help=f"{n_acts} att."):
+                                            st.session_state.cal_selected_day = dstr
+                                            st.session_state.cal_view = "Mese"
+                                            st.session_state.cal_month = day.month
+                                            st.rerun()
+
+        st.divider()
+
+        # ════════════════════════════════════
+        # PANNELLO DETTAGLIO — giorno selezionato
+        # ════════════════════════════════════
+        selected_day = st.session_state.cal_selected_day
+        if selected_day and selected_day in acts_by_day:
+            day_acts_sel = acts_by_day[selected_day]
+            n_sel        = len(day_acts_sel)
+            st.markdown(f"### 📋 {selected_day} — {n_sel} {'attività' if n_sel > 1 else 'attività'}")
+
+            for _, act in day_acts_sel.iterrows():
+                si      = get_sport_info(act["type"])
+                dist_km = act["distance"] / 1000
+                hrs     = act["moving_time"] / 3600
+                tss_v   = act.get("tss", 0) or 0
+                elev    = act.get("total_elevation_gain", 0) or 0
+                hr_avg  = act.get("average_heartrate")
+                name_a  = act.get("name", act["type"])
+
+                # Calcola passo se corsa
+                if act["type"] in ["Run", "TrailRun"] and dist_km > 0:
+                    pace_s  = act["moving_time"] / dist_km
+                    pace_str = f"{int(pace_s//60)}:{int(pace_s%60):02d} /km"
+                else:
+                    pace_str = None
+
+                with st.container():
+                    st.markdown(f"""
+                    <div style="background:rgba(255,255,255,0.04);border:1px solid {si['color']}44;
+                                border-left:4px solid {si['color']};border-radius:12px;padding:14px 18px;margin:6px 0">
+                        <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">
+                            <span style="font-size:22px">{si['icon']}</span>
+                            <span style="font-size:16px;font-weight:700;color:#eee">{name_a}</span>
+                            <span style="font-size:12px;color:#888">{act['start_date'].strftime('%H:%M')}</span>
+                        </div>
+                        <div style="display:flex;flex-wrap:wrap;gap:10px">
+                            <span style="background:rgba(255,255,255,0.07);border-radius:20px;padding:3px 12px;font-size:12px">
+                                📏 <b>{dist_km:.1f} km</b></span>
+                            <span style="background:rgba(255,255,255,0.07);border-radius:20px;padding:3px 12px;font-size:12px">
+                                ⏱️ <b>{int(hrs)}h {int((hrs%1)*60)}m</b></span>
+                            {'<span style="background:rgba(255,255,255,0.07);border-radius:20px;padding:3px 12px;font-size:12px">🏃 <b>' + pace_str + '</b></span>' if pace_str else ''}
+                            {'<span style="background:rgba(255,255,255,0.07);border-radius:20px;padding:3px 12px;font-size:12px">❤️ <b>' + str(int(hr_avg)) + ' bpm</b></span>' if hr_avg and pd.notna(hr_avg) else ''}
+                            <span style="background:rgba(255,255,255,0.07);border-radius:20px;padding:3px 12px;font-size:12px">
+                                ⚡ <b>{tss_v:.0f} TSS</b></span>
+                            {'<span style="background:rgba(255,255,255,0.07);border-radius:20px;padding:3px 12px;font-size:12px">⛰️ <b>' + str(int(elev)) + ' m</b></span>' if elev > 0 else ''}
+                        </div>
+                    </div>""", unsafe_allow_html=True)
+
+        elif selected_day:
+            st.info(f"Nessuna attività il {selected_day} nel filtro attuale.")
+
+        st.divider()
+
+        # ── Consistenza Annuale (heatmap stile GitHub) ──
         st.markdown("#### 🟩 Consistenza Annuale")
-        df_heat = df.copy()
-        df_heat["date"] = df_heat["start_date"].dt.date
-        days_with_activity = set(df_heat["date"].astype(str).tolist())
+        df_heat2 = df.copy()
+        df_heat2["date"] = df_heat2["start_date"].dt.date
+        days_with_activity = set(df_heat2["date"].astype(str).tolist())
         today = datetime.now().date()
         year_start = today.replace(month=1, day=1)
-        heat_html = '<div style="display:flex; flex-wrap:wrap; gap:2px; margin:8px 0">'
-        d = year_start
-        week_cols = []
-        current_week = []
-        while d <= today:
-            ds = str(d)
-            has = ds in days_with_activity
-            color = "#4CAF50" if has else "#1e1e2e"
-            border = "rgba(76,175,80,0.33)" if has else "#333"
-            current_week.append(f'<div title="{ds}" style="width:14px;height:14px;border-radius:3px;background:{color};border:1px solid {border}"></div>')
-            if d.weekday() == 6:
-                week_cols.append("".join(current_week))
-                current_week = []
-            d += timedelta(days=1)
-        if current_week:
-            week_cols.append("".join(current_week))
 
-        heat_html = '<div style="display:flex; gap:3px">'
-        for w in week_cols:
-            heat_html += f'<div style="display:flex; flex-direction:column; gap:2px">{w}</div>'
-        heat_html += "</div>"
+        week_cols2 = []
+        current_week2 = []
+        d2 = year_start
+        while d2 <= today:
+            ds2 = str(d2)
+            if ds2 in acts_by_day and not acts_by_day[ds2].empty:
+                top_s = acts_by_day[ds2]["type"].value_counts().index[0]
+                clr   = get_sport_info(top_s)["color"]
+            else:
+                clr   = "#1e1e2e"
+            brd = "#333" if clr == "#1e1e2e" else "transparent"
+            current_week2.append(f'<div title="{ds2}" style="width:14px;height:14px;border-radius:3px;background:{clr};border:1px solid {brd}"></div>')
+            if d2.weekday() == 6:
+                week_cols2.append("".join(current_week2))
+                current_week2 = []
+            d2 += timedelta(days=1)
+        if current_week2:
+            week_cols2.append("".join(current_week2))
 
-        streak = 0
-        d = today
-        while str(d) in days_with_activity:
-            streak += 1
-            d -= timedelta(days=1)
+        heat_html2 = '<div style="display:flex;gap:3px">'
+        for w2 in week_cols2:
+            heat_html2 += f'<div style="display:flex;flex-direction:column;gap:2px">{w2}</div>'
+        heat_html2 += "</div>"
 
-        total_days = (today - year_start).days + 1
-        active_days = sum(1 for dd in days_with_activity if str(year_start) <= dd <= str(today))
+        streak2 = 0
+        d3 = today
+        while str(d3) in days_with_activity:
+            streak2 += 1
+            d3 -= timedelta(days=1)
+
+        total_days2 = (today - year_start).days + 1
+        active_days2 = sum(1 for dd in days_with_activity if str(year_start) <= dd <= str(today))
 
         col_h1, col_h2, col_h3 = st.columns(3)
-        col_h1.metric("🔥 Streak attuale", f"{streak} giorni")
-        col_h2.metric("📅 Giorni attivi (anno)", active_days)
-        col_h3.metric("📊 % Consistenza", f"{active_days/total_days*100:.0f}%")
-        st.markdown(heat_html, unsafe_allow_html=True)
-
+        col_h1.metric("🔥 Streak attuale",      f"{streak2} giorni")
+        col_h2.metric("📅 Giorni attivi (anno)", active_days2)
+        col_h3.metric("📊 % Consistenza",        f"{active_days2/total_days2*100:.0f}%")
+        st.markdown(heat_html2, unsafe_allow_html=True)
+        # Legenda colori sport
+        st.markdown("<div style='display:flex;flex-wrap:wrap;gap:8px;margin-top:6px'>", unsafe_allow_html=True)
+        leg_parts = []
+        for sp in sorted(df["type"].unique()):
+            si_leg = get_sport_info(sp)
+            leg_parts.append(f'<span style="display:inline-flex;align-items:center;gap:4px;font-size:11px;color:#888"><div style="width:10px;height:10px;border-radius:50%;background:{si_leg['color']}"></div>{si_leg['icon']} {si_leg['label']}</span>')
+        st.markdown(" ".join(leg_parts) + "</div>", unsafe_allow_html=True)
     # ============================================================
     # COACH CHAT
     # ============================================================
