@@ -4875,15 +4875,11 @@ map.on('draw.delete', updateStats);
     elif menu == "📅 Calendario":
         st.markdown("## 📅 Calendario Allenamenti")
 
-        # ── State per giorno selezionato ──
-        if "cal_selected_day" not in st.session_state:
-            st.session_state.cal_selected_day = None
-        if "cal_view" not in st.session_state:
-            st.session_state.cal_view = "Mese"
-        if "cal_month" not in st.session_state:
-            st.session_state.cal_month = datetime.now().month
-        if "cal_year" not in st.session_state:
-            st.session_state.cal_year = datetime.now().year
+        # ── State ──
+        for _k, _v in [("cal_selected_day", None), ("cal_view", "Mese"),
+                        ("cal_month", datetime.now().month), ("cal_year", datetime.now().year)]:
+            if _k not in st.session_state:
+                st.session_state[_k] = _v
 
         # ── Filtri sport ──
         all_sports = sorted(df["type"].unique().tolist())
@@ -4891,346 +4887,299 @@ map.on('draw.delete', updateStats);
             st.session_state.sport_filter = set(all_sports)
 
         st.markdown("**Filtra per sport:**")
-        btn_cols = st.columns(min(len(all_sports) + 2, 10))
-        for i, sport in enumerate(all_sports):
-            si = get_sport_info(sport)
-            is_active = sport in st.session_state.sport_filter
-            with btn_cols[i % (len(btn_cols) - 2)]:
-                if st.button(
-                    f"{si['icon']} {si['label']}",
-                    key=f"cal_sport_{sport}",
-                    type="primary" if is_active else "secondary",
-                    use_container_width=True,
-                ):
-                    sf = st.session_state.sport_filter
-                    if sport in sf: sf.discard(sport)
-                    else:           sf.add(sport)
+        _sport_cols = st.columns(min(len(all_sports) + 2, 10))
+        for _si, _sp in enumerate(all_sports):
+            _sinfo = get_sport_info(_sp)
+            with _sport_cols[_si % (len(_sport_cols))]:
+                if st.button(f"{_sinfo['icon']} {_sinfo['label']}", key=f"calsport_{_sp}",
+                             type="primary" if _sp in st.session_state.sport_filter else "secondary",
+                             use_container_width=True):
+                    _sf = st.session_state.sport_filter
+                    if _sp in _sf: _sf.discard(_sp)
+                    else:          _sf.add(_sp)
                     st.rerun()
-        c_all_c, c_none_c, _ = st.columns([1, 1, 6])
-        with c_all_c:
-            if st.button("✅ Tutti",  key="cal_all",  use_container_width=True):
+        _ca, _cn, _ = st.columns([1, 1, 6])
+        with _ca:
+            if st.button("✅ Tutti",   key="calall",  use_container_width=True):
                 st.session_state.sport_filter = set(all_sports); st.rerun()
-        with c_none_c:
-            if st.button("❌ Nessuno", key="cal_none", use_container_width=True):
+        with _cn:
+            if st.button("❌ Nessuno", key="calnone", use_container_width=True):
                 st.session_state.sport_filter = set(); st.rerun()
 
-        df_filtered = df[df["type"].isin(st.session_state.sport_filter)].copy()
+        df_cal = df[df["type"].isin(st.session_state.sport_filter)].copy()
+        df_cal["_ds"] = df_cal["start_date"].dt.strftime("%Y-%m-%d")
+        acts_by_day = {ds: grp for ds, grp in df_cal.groupby("_ds")}
 
         st.divider()
 
-        # ── Vista Settimana / Mese / Anno ──
-        view_c1, view_c2, view_c3, nav_c1, nav_c2, nav_c3 = st.columns([1, 1, 1, 1, 2, 1])
-        with view_c1:
-            if st.button("📅 Settimana", type="primary" if st.session_state.cal_view == "Settimana" else "secondary", use_container_width=True):
-                st.session_state.cal_view = "Settimana"; st.rerun()
-        with view_c2:
-            if st.button("🗓️ Mese", type="primary" if st.session_state.cal_view == "Mese" else "secondary", use_container_width=True):
-                st.session_state.cal_view = "Mese"; st.rerun()
-        with view_c3:
-            if st.button("📆 Anno", type="primary" if st.session_state.cal_view == "Anno" else "secondary", use_container_width=True):
-                st.session_state.cal_view = "Anno"; st.rerun()
+        # ── Vista switcher + navigazione ──
+        _vc1, _vc2, _vc3, _nav1, _nav2, _nav3 = st.columns([1,1,1,1,2,1])
+        for _col, _lbl, _view in [(_vc1,"📅 Settimana","Settimana"),
+                                   (_vc2,"🗓️ Mese","Mese"),
+                                   (_vc3,"📆 Anno","Anno")]:
+            with _col:
+                if st.button(_lbl, key=f"calview_{_view}",
+                             type="primary" if st.session_state.cal_view == _view else "secondary",
+                             use_container_width=True):
+                    st.session_state.cal_view = _view
+                    st.session_state.cal_selected_day = None
+                    st.rerun()
 
-        # Navigazione mese/anno
-        with nav_c1:
-            if st.button("◀", key="cal_prev", use_container_width=True):
+        with _nav1:
+            if st.button("◀", key="calprev", use_container_width=True):
                 if st.session_state.cal_view == "Anno":
                     st.session_state.cal_year -= 1
+                elif st.session_state.cal_month == 1:
+                    st.session_state.cal_month = 12; st.session_state.cal_year -= 1
                 else:
-                    if st.session_state.cal_month == 1:
-                        st.session_state.cal_month = 12
-                        st.session_state.cal_year -= 1
-                    else:
-                        st.session_state.cal_month -= 1
-                st.session_state.cal_selected_day = None
-                st.rerun()
-        with nav_c2:
+                    st.session_state.cal_month -= 1
+                st.session_state.cal_selected_day = None; st.rerun()
+        with _nav2:
+            import calendar as _calmod
             if st.session_state.cal_view == "Anno":
-                st.markdown(f"<div style='text-align:center;font-size:18px;font-weight:700;padding:6px'>{st.session_state.cal_year}</div>", unsafe_allow_html=True)
+                _nav_label = str(st.session_state.cal_year)
             else:
-                import calendar as _cal
-                mname = _cal.month_name[st.session_state.cal_month]
-                st.markdown(f"<div style='text-align:center;font-size:18px;font-weight:700;padding:6px'>{mname} {st.session_state.cal_year}</div>", unsafe_allow_html=True)
-        with nav_c3:
-            if st.button("▶", key="cal_next", use_container_width=True):
+                _nav_label = f"{_calmod.month_name[st.session_state.cal_month]} {st.session_state.cal_year}"
+            st.markdown(f"<div style='text-align:center;font-size:17px;font-weight:700;padding:7px'>{_nav_label}</div>",
+                        unsafe_allow_html=True)
+        with _nav3:
+            if st.button("▶", key="calnext", use_container_width=True):
                 if st.session_state.cal_view == "Anno":
                     st.session_state.cal_year += 1
+                elif st.session_state.cal_month == 12:
+                    st.session_state.cal_month = 1; st.session_state.cal_year += 1
                 else:
-                    if st.session_state.cal_month == 12:
-                        st.session_state.cal_month = 1
-                        st.session_state.cal_year += 1
-                    else:
-                        st.session_state.cal_month += 1
-                st.session_state.cal_selected_day = None
-                st.rerun()
+                    st.session_state.cal_month += 1
+                st.session_state.cal_selected_day = None; st.rerun()
 
         st.divider()
 
-        # ── Funzione helper: dots per un giorno ──
-        def day_dots_html(day_acts, max_dots=5):
-            """Genera pallini colorati per le attività di un giorno."""
-            dots = ""
-            for _, r in day_acts.head(max_dots).iterrows():
-                si  = get_sport_info(r["type"])
-                tss = r.get("tss", 0) or 0
-                sz  = max(8, min(16, int(tss / 6) + 8))  # size 8-16px proporzionale al TSS
-                dots += (f'<div title="{si['label']} — {r['distance']/1000:.1f}km — TSS {tss:.0f}" ' +
-                         f'style="width:{sz}px;height:{sz}px;border-radius:50%;background:{si['color']};' +
-                         f'display:inline-block;margin:1px;cursor:pointer"></div>')
-            if len(day_acts) > max_dots:
-                dots += f'<div style="font-size:9px;color:#888;display:inline">+{len(day_acts)-max_dots}</div>'
-            return dots
-
-        # ── Raggruppa attività per data ──
-        df_filtered["_date_str"] = df_filtered["start_date"].dt.strftime("%Y-%m-%d")
-        acts_by_day = {}
-        for dstr, grp in df_filtered.groupby("_date_str"):
-            acts_by_day[dstr] = grp
+        import calendar as _cm
 
         # ════════════════════════════════════
-        # VISTA MESE — griglia 7 colonne
+        # VISTA MESE e SETTIMANA
         # ════════════════════════════════════
         if st.session_state.cal_view in ("Mese", "Settimana"):
-            import calendar as _cal2
-            y = st.session_state.cal_year
-            m = st.session_state.cal_month
+            _y = st.session_state.cal_year
+            _m = st.session_state.cal_month
 
             if st.session_state.cal_view == "Settimana":
-                # Settimana corrente che include oggi
-                today_dt = datetime.now().date()
-                week_start = today_dt - timedelta(days=today_dt.weekday())  # lunedì
-                days_to_show = [week_start + timedelta(days=i) for i in range(7)]
-                weeks_list   = [days_to_show]
-                y = today_dt.year
-                m = today_dt.month
+                _td  = datetime.now().date()
+                _ws  = _td - timedelta(days=_td.weekday())
+                _weeks = [[_ws + timedelta(days=i) for i in range(7)]]
+                _y, _m = _td.year, _td.month
             else:
-                # Mese intero
-                cal_obj   = _cal2.Calendar(firstweekday=0)
-                month_days = cal_obj.monthdatescalendar(y, m)
-                weeks_list = month_days
+                _weeks = _cm.Calendar(firstweekday=0).monthdatescalendar(_y, _m)
 
-            # Header giorni settimana
-            day_names = ["Lun", "Mar", "Mer", "Gio", "Ven", "Sab", "Dom"]
-            header_html = '<div style="display:grid;grid-template-columns:repeat(7,1fr);gap:4px;margin-bottom:4px">'
-            for dn in day_names:
-                header_html += f'<div style="text-align:center;font-size:11px;color:#888;font-weight:600">{dn}</div>'
-            header_html += "</div>"
-            st.markdown(header_html, unsafe_allow_html=True)
+            # Header giorni
+            _DAY_NAMES = ["Lun","Mar","Mer","Gio","Ven","Sab","Dom"]
+            _hcols = st.columns(7)
+            for _di, _dn in enumerate(_DAY_NAMES):
+                _hcols[_di].markdown(
+                    f"<div style='text-align:center;font-size:11px;color:#888;font-weight:600'>{_dn}</div>",
+                    unsafe_allow_html=True)
 
-            # Griglia giorni
-            for week in weeks_list:
-                cols_week = st.columns(7)
-                for ci, day in enumerate(week):
-                    with cols_week[ci]:
-                        dstr     = day.strftime("%Y-%m-%d")
-                        is_today = (day == datetime.now().date())
-                        in_month = (day.month == m)
-                        day_acts = acts_by_day.get(dstr, pd.DataFrame())
-                        selected = (st.session_state.cal_selected_day == dstr)
+            # Griglia settimane
+            for _week in _weeks:
+                _wcols = st.columns(7)
+                for _ci, _day in enumerate(_week):
+                    with _wcols[_ci]:
+                        _ds      = _day.strftime("%Y-%m-%d")
+                        _in_m    = (_day.month == _m)
+                        _is_tod  = (_day == datetime.now().date())
+                        _sel     = (st.session_state.cal_selected_day == _ds)
+                        _dacts   = acts_by_day.get(_ds)
+                        _has_act = _dacts is not None and not _dacts.empty
 
-                        # Colore sfondo
-                        if selected:
-                            bg = "rgba(233,69,96,0.25)"
-                            border = "2px solid #e94560"
-                        elif is_today:
-                            bg = "rgba(33,150,243,0.15)"
-                            border = "1px solid #2196F355"
-                        elif not in_month:
-                            bg = "transparent"
-                            border = "1px solid transparent"
-                        elif not isinstance(day_acts, pd.DataFrame) or day_acts.empty:
-                            bg = "rgba(255,255,255,0.02)"
-                            border = "1px solid rgba(255,255,255,0.06)"
+                        # Colore bordo/sfondo cella
+                        if _sel:
+                            _bg, _brd = "rgba(233,69,96,0.2)", "2px solid #e94560"
+                        elif _is_tod:
+                            _bg, _brd = "rgba(33,150,243,0.12)", "1px solid #2196F366"
+                        elif not _in_m:
+                            _bg, _brd = "transparent", "1px solid transparent"
+                        elif _has_act:
+                            _bg, _brd = "rgba(255,255,255,0.04)", "1px solid rgba(255,255,255,0.1)"
                         else:
-                            bg = "rgba(255,255,255,0.04)"
-                            border = "1px solid rgba(255,255,255,0.1)"
+                            _bg, _brd = "rgba(255,255,255,0.01)", "1px solid rgba(255,255,255,0.04)"
 
-                        num_color = "#e94560" if is_today else "#fff" if in_month else "#444"
-                        dots_html = day_dots_html(day_acts) if not isinstance(day_acts, pd.DataFrame) or not day_acts.empty else ""
+                        _num_col = "#e94560" if _is_tod else "#fff" if _in_m else "#444"
 
-                        cell_html = f"""
-                        <div style="background:{bg};border:{border};border-radius:10px;
-                                    padding:6px 4px 4px;min-height:60px;text-align:center">
-                            <div style="font-size:13px;font-weight:700;color:{num_color}">{day.day}</div>
-                            <div style="margin-top:3px;display:flex;flex-wrap:wrap;justify-content:center;gap:2px">
-                                {dots_html}
-                            </div>
-                        </div>"""
-                        st.markdown(cell_html, unsafe_allow_html=True)
+                        # Pallini sport
+                        _dots = ""
+                        if _has_act:
+                            for _, _ar in _dacts.head(4).iterrows():
+                                _asi  = get_sport_info(_ar["type"])
+                                _tss  = float(_ar.get("tss") or 0)
+                                _sz   = max(7, min(15, int(_tss/7) + 7))
+                                _title = f"{_asi['label']} {_ar['distance']/1000:.1f}km TSS:{_tss:.0f}"
+                                _dots += (f'<div title="{_title}" style="width:{_sz}px;height:{_sz}px;'
+                                          f'border-radius:50%;background:{_asi["color"]};display:inline-block;margin:1px"></div>')
+                            if len(_dacts) > 4:
+                                _dots += f'<span style="font-size:9px;color:#888">+{len(_dacts)-4}</span>'
 
-                        # Bottone invisibile sovrapposto per click
-                        if not isinstance(day_acts, pd.DataFrame) or not day_acts.empty:
-                            if st.button(f"{day.day}", key=f"cal_day_{dstr}",
-                                         use_container_width=True,
-                                         help=f"{len(day_acts)} attività il {dstr}"):
-                                if st.session_state.cal_selected_day == dstr:
-                                    st.session_state.cal_selected_day = None
-                                else:
-                                    st.session_state.cal_selected_day = dstr
+                        st.markdown(
+                            f'<div style="background:{_bg};border:{_brd};border-radius:10px;'
+                            f'padding:5px 3px 4px;min-height:56px;text-align:center;pointer-events:none">'
+                            f'<div style="font-size:12px;font-weight:700;color:{_num_col}">{_day.day if _in_m else ""}</div>'
+                            f'<div style="display:flex;flex-wrap:wrap;justify-content:center;gap:1px;margin-top:3px">{_dots}</div>'
+                            f'</div>',
+                            unsafe_allow_html=True)
+
+                        # Bottone click — solo sui giorni con attività
+                        if _has_act and _in_m:
+                            _btn_lbl = f"{'●' if not _sel else '○'}"
+                            if st.button(_btn_lbl, key=f"cd_{_ds}",
+                                         help=f"{len(_dacts)} {'attività' if len(_dacts)>1 else 'attività'} — clicca per dettaglio",
+                                         use_container_width=True):
+                                st.session_state.cal_selected_day = None if _sel else _ds
                                 st.rerun()
 
         # ════════════════════════════════════
-        # VISTA ANNO — 4 righe × 3 mesi
+        # VISTA ANNO
         # ════════════════════════════════════
         elif st.session_state.cal_view == "Anno":
-            import calendar as _cal3
-            y = st.session_state.cal_year
-            months_per_row = 3
-            months = list(range(1, 13))
-
-            for row_start in range(0, 12, months_per_row):
-                row_months = months[row_start:row_start + months_per_row]
-                mcols = st.columns(months_per_row)
-                for mi, month_num in enumerate(row_months):
-                    with mcols[mi]:
-                        mname = _cal3.month_name[month_num]
-                        st.markdown(f"<div style='font-size:13px;font-weight:700;color:#aaa;margin-bottom:4px'>{mname}</div>",
-                                    unsafe_allow_html=True)
-
-                        cal_obj   = _cal3.Calendar(firstweekday=0)
-                        month_days = cal_obj.monthdatescalendar(y, month_num)
-
-                        for week in month_days:
-                            wcols = st.columns(7)
-                            for ci2, day in enumerate(week):
-                                with wcols[ci2]:
-                                    dstr     = day.strftime("%Y-%m-%d")
-                                    in_month = (day.month == month_num)
-                                    day_acts = acts_by_day.get(dstr, pd.DataFrame())
-                                    is_today = (day == datetime.now().date())
-
-                                    if not in_month:
-                                        st.markdown('<div style="height:20px"></div>', unsafe_allow_html=True)
+            _y = st.session_state.cal_year
+            for _row_s in range(0, 12, 3):
+                _mcols = st.columns(3)
+                for _mi, _mn in enumerate(range(_row_s+1, _row_s+4)):
+                    with _mcols[_mi]:
+                        st.markdown(
+                            f"<div style='font-size:13px;font-weight:700;color:#aaa;margin-bottom:4px'>"
+                            f"{_cm.month_name[_mn]}</div>",
+                            unsafe_allow_html=True)
+                        _yr_weeks = _cm.Calendar(firstweekday=0).monthdatescalendar(_y, _mn)
+                        for _yw in _yr_weeks:
+                            _yc = st.columns(7)
+                            for _yci, _yd in enumerate(_yw):
+                                with _yc[_yci]:
+                                    if _yd.month != _mn:
+                                        st.markdown('<div style="height:16px"></div>', unsafe_allow_html=True)
                                         continue
-
-                                    if not isinstance(day_acts, pd.DataFrame) or day_acts.empty:
-                                        dot_html = f'<div title="{dstr}" style="width:8px;height:8px;border-radius:50%;background:#1e1e2e;border:1px solid #333;margin:auto"></div>'
-                                        st.markdown(dot_html, unsafe_allow_html=True)
-                                    else:
-                                        # Mostra un solo dot grande colorato per il tipo principale
-                                        top_sport = day_acts["type"].value_counts().index[0]
-                                        si_top    = get_sport_info(top_sport)
-                                        n_acts    = len(day_acts)
-                                        sz        = 10 if n_acts == 1 else 13
-                                        sel_a     = (st.session_state.cal_selected_day == dstr)
-                                        border_a  = "2px solid #e94560" if sel_a else "none"
-                                        dot_html  = (f'<div title="{dstr}: {n_acts} attività"' +
-                                                     f' style="width:{sz}px;height:{sz}px;border-radius:50%;"' +
-                                                     f'background:{si_top['color']};border:{border_a};' +
-                                                     f'cursor:pointer;margin:auto"></div>')
-                                        st.markdown(dot_html, unsafe_allow_html=True)
-                                        if st.button("·", key=f"yr_day_{dstr}", help=f"{n_acts} att."):
-                                            st.session_state.cal_selected_day = dstr
-                                            st.session_state.cal_view = "Mese"
-                                            st.session_state.cal_month = day.month
+                                    _yds   = _yd.strftime("%Y-%m-%d")
+                                    _ydact = acts_by_day.get(_yds)
+                                    _yhas  = _ydact is not None and not _ydact.empty
+                                    _ysel  = (st.session_state.cal_selected_day == _yds)
+                                    if _yhas:
+                                        _ysp   = _ydact["type"].value_counts().index[0]
+                                        _ysi   = get_sport_info(_ysp)
+                                        _ysz   = 11 if len(_ydact) > 1 else 9
+                                        _ybrd  = "2px solid #e94560" if _ysel else "none"
+                                        st.markdown(
+                                            f'<div title="{_yds}: {len(_ydact)} att." style="width:{_ysz}px;height:{_ysz}px;'
+                                            f'border-radius:50%;background:{_ysi["color"]};border:{_ybrd};margin:auto;cursor:pointer"></div>',
+                                            unsafe_allow_html=True)
+                                        if st.button("·", key=f"yrd_{_yds}",
+                                                     help=f"{len(_ydact)} att. — click per dettaglio"):
+                                            st.session_state.cal_selected_day = _yds
+                                            st.session_state.cal_view  = "Mese"
+                                            st.session_state.cal_month = _yd.month
+                                            st.session_state.cal_year  = _yd.year
                                             st.rerun()
+                                    else:
+                                        st.markdown(
+                                            f'<div title="{_yds}" style="width:7px;height:7px;border-radius:50%;'
+                                            f'background:#1e1e2e;border:1px solid #333;margin:auto"></div>',
+                                            unsafe_allow_html=True)
 
         st.divider()
 
         # ════════════════════════════════════
-        # PANNELLO DETTAGLIO — giorno selezionato
+        # DETTAGLIO GIORNO SELEZIONATO
         # ════════════════════════════════════
-        selected_day = st.session_state.cal_selected_day
-        if selected_day and selected_day in acts_by_day:
-            day_acts_sel = acts_by_day[selected_day]
-            n_sel        = len(day_acts_sel)
-            st.markdown(f"### 📋 {selected_day} — {n_sel} {'attività' if n_sel > 1 else 'attività'}")
-
-            for _, act in day_acts_sel.iterrows():
-                si      = get_sport_info(act["type"])
-                dist_km = act["distance"] / 1000
-                hrs     = act["moving_time"] / 3600
-                tss_v   = act.get("tss", 0) or 0
-                elev    = act.get("total_elevation_gain", 0) or 0
-                hr_avg  = act.get("average_heartrate")
-                name_a  = act.get("name", act["type"])
-
-                # Calcola passo se corsa
-                if act["type"] in ["Run", "TrailRun"] and dist_km > 0:
-                    pace_s  = act["moving_time"] / dist_km
-                    pace_str = f"{int(pace_s//60)}:{int(pace_s%60):02d} /km"
-                else:
-                    pace_str = None
-
-                with st.container():
-                    st.markdown(f"""
-                    <div style="background:rgba(255,255,255,0.04);border:1px solid {si['color']}44;
-                                border-left:4px solid {si['color']};border-radius:12px;padding:14px 18px;margin:6px 0">
-                        <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">
-                            <span style="font-size:22px">{si['icon']}</span>
-                            <span style="font-size:16px;font-weight:700;color:#eee">{name_a}</span>
-                            <span style="font-size:12px;color:#888">{act['start_date'].strftime('%H:%M')}</span>
-                        </div>
-                        <div style="display:flex;flex-wrap:wrap;gap:10px">
-                            <span style="background:rgba(255,255,255,0.07);border-radius:20px;padding:3px 12px;font-size:12px">
-                                📏 <b>{dist_km:.1f} km</b></span>
-                            <span style="background:rgba(255,255,255,0.07);border-radius:20px;padding:3px 12px;font-size:12px">
-                                ⏱️ <b>{int(hrs)}h {int((hrs%1)*60)}m</b></span>
-                            {'<span style="background:rgba(255,255,255,0.07);border-radius:20px;padding:3px 12px;font-size:12px">🏃 <b>' + pace_str + '</b></span>' if pace_str else ''}
-                            {'<span style="background:rgba(255,255,255,0.07);border-radius:20px;padding:3px 12px;font-size:12px">❤️ <b>' + str(int(hr_avg)) + ' bpm</b></span>' if hr_avg and pd.notna(hr_avg) else ''}
-                            <span style="background:rgba(255,255,255,0.07);border-radius:20px;padding:3px 12px;font-size:12px">
-                                ⚡ <b>{tss_v:.0f} TSS</b></span>
-                            {'<span style="background:rgba(255,255,255,0.07);border-radius:20px;padding:3px 12px;font-size:12px">⛰️ <b>' + str(int(elev)) + ' m</b></span>' if elev > 0 else ''}
-                        </div>
-                    </div>""", unsafe_allow_html=True)
-
-        elif selected_day:
-            st.info(f"Nessuna attività il {selected_day} nel filtro attuale.")
+        _sel_day = st.session_state.cal_selected_day
+        if _sel_day and _sel_day in acts_by_day:
+            _sel_acts = acts_by_day[_sel_day]
+            st.markdown(f"### 📋 {_sel_day} — {len(_sel_acts)} attività")
+            for _, _ar in _sel_acts.iterrows():
+                _asi     = get_sport_info(_ar["type"])
+                _dist_km = _ar["distance"] / 1000
+                _hrs     = _ar["moving_time"] / 3600
+                _tss_v   = float(_ar.get("tss") or 0)
+                _elev    = float(_ar.get("total_elevation_gain") or 0)
+                _hr_avg  = _ar.get("average_heartrate")
+                _name_a  = _ar.get("name") or _ar["type"]
+                _pace_str = ""
+                if _ar["type"] in ["Run","TrailRun","VirtualRun"] and _dist_km > 0:
+                    _ps = _ar["moving_time"] / _dist_km
+                    _pace_str = f"🏃 <b>{int(_ps//60)}:{int(_ps%60):02d} /km</b>"
+                _hr_str  = f"❤️ <b>{int(_hr_avg)} bpm</b>" if _hr_avg and pd.notna(_hr_avg) else ""
+                _elev_str = f"⛰️ <b>{int(_elev)} m</b>" if _elev > 0 else ""
+                _pills = "".join([
+                    f'<span style="background:rgba(255,255,255,0.07);border-radius:20px;padding:3px 12px;font-size:12px;margin:2px">📏 <b>{_dist_km:.1f} km</b></span>',
+                    f'<span style="background:rgba(255,255,255,0.07);border-radius:20px;padding:3px 12px;font-size:12px;margin:2px">⏱️ <b>{int(_hrs)}h {int((_hrs%1)*60)}m</b></span>',
+                    f'<span style="background:rgba(255,255,255,0.07);border-radius:20px;padding:3px 12px;font-size:12px;margin:2px">{_pace_str}</span>' if _pace_str else "",
+                    f'<span style="background:rgba(255,255,255,0.07);border-radius:20px;padding:3px 12px;font-size:12px;margin:2px">{_hr_str}</span>' if _hr_str else "",
+                    f'<span style="background:rgba(255,255,255,0.07);border-radius:20px;padding:3px 12px;font-size:12px;margin:2px">⚡ <b>{_tss_v:.0f} TSS</b></span>',
+                    f'<span style="background:rgba(255,255,255,0.07);border-radius:20px;padding:3px 12px;font-size:12px;margin:2px">{_elev_str}</span>' if _elev_str else "",
+                ])
+                st.markdown(
+                    f'<div style="background:rgba(255,255,255,0.04);border:1px solid {_asi["color"]}44;'
+                    f'border-left:4px solid {_asi["color"]};border-radius:12px;padding:14px 18px;margin:6px 0">'
+                    f'<div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">'
+                    f'<span style="font-size:22px">{_asi["icon"]}</span>'
+                    f'<span style="font-size:16px;font-weight:700;color:#eee">{_name_a}</span>'
+                    f'<span style="font-size:12px;color:#888">{_ar["start_date"].strftime("%H:%M")}</span>'
+                    f'</div><div style="display:flex;flex-wrap:wrap;gap:4px">{_pills}</div></div>',
+                    unsafe_allow_html=True)
+        elif _sel_day:
+            st.info(f"Nessuna attività il {_sel_day} (controlla i filtri sport).")
 
         st.divider()
 
-        # ── Consistenza Annuale (heatmap stile GitHub) ──
+        # ── Heatmap consistenza annuale ──
         st.markdown("#### 🟩 Consistenza Annuale")
-        df_heat2 = df.copy()
-        df_heat2["date"] = df_heat2["start_date"].dt.date
-        days_with_activity = set(df_heat2["date"].astype(str).tolist())
-        today = datetime.now().date()
-        year_start = today.replace(month=1, day=1)
-
-        week_cols2 = []
-        current_week2 = []
-        d2 = year_start
-        while d2 <= today:
-            ds2 = str(d2)
-            if ds2 in acts_by_day and not acts_by_day[ds2].empty:
-                top_s = acts_by_day[ds2]["type"].value_counts().index[0]
-                clr   = get_sport_info(top_s)["color"]
+        _today   = datetime.now().date()
+        _ys      = _today.replace(month=1, day=1)
+        _wks     = []
+        _cw      = []
+        _d       = _ys
+        _act_set = set(acts_by_day.keys())
+        while _d <= _today:
+            _dstr = _d.strftime("%Y-%m-%d")
+            _dact = acts_by_day.get(_dstr)
+            if _dact is not None and not _dact.empty:
+                _top = _dact["type"].value_counts().index[0]
+                _clr = get_sport_info(_top)["color"]
             else:
-                clr   = "#1e1e2e"
-            brd = "#333" if clr == "#1e1e2e" else "transparent"
-            current_week2.append(f'<div title="{ds2}" style="width:14px;height:14px;border-radius:3px;background:{clr};border:1px solid {brd}"></div>')
-            if d2.weekday() == 6:
-                week_cols2.append("".join(current_week2))
-                current_week2 = []
-            d2 += timedelta(days=1)
-        if current_week2:
-            week_cols2.append("".join(current_week2))
+                _clr = "#1e1e2e"
+            _brd = "#333" if _clr == "#1e1e2e" else "transparent"
+            _cw.append(f'<div title="{_dstr}" style="width:14px;height:14px;border-radius:3px;'
+                       f'background:{_clr};border:1px solid {_brd}"></div>')
+            if _d.weekday() == 6:
+                _wks.append("".join(_cw)); _cw = []
+            _d += timedelta(days=1)
+        if _cw:
+            _wks.append("".join(_cw))
 
-        heat_html2 = '<div style="display:flex;gap:3px">'
-        for w2 in week_cols2:
-            heat_html2 += f'<div style="display:flex;flex-direction:column;gap:2px">{w2}</div>'
-        heat_html2 += "</div>"
+        _heat = '<div style="display:flex;gap:3px">'
+        for _w in _wks:
+            _heat += f'<div style="display:flex;flex-direction:column;gap:2px">{_w}</div>'
+        _heat += "</div>"
 
-        streak2 = 0
-        d3 = today
-        while str(d3) in days_with_activity:
-            streak2 += 1
-            d3 -= timedelta(days=1)
+        _streak = 0
+        _d2 = _today
+        while _d2.strftime("%Y-%m-%d") in _act_set:
+            _streak += 1; _d2 -= timedelta(days=1)
+        _total  = (_today - _ys).days + 1
+        _active = sum(1 for _dd in _act_set if str(_ys) <= _dd <= str(_today))
 
-        total_days2 = (today - year_start).days + 1
-        active_days2 = sum(1 for dd in days_with_activity if str(year_start) <= dd <= str(today))
+        _h1, _h2, _h3 = st.columns(3)
+        _h1.metric("🔥 Streak attuale",      f"{_streak} giorni")
+        _h2.metric("📅 Giorni attivi (anno)", _active)
+        _h3.metric("📊 % Consistenza",        f"{_active/_total*100:.0f}%")
+        st.markdown(_heat, unsafe_allow_html=True)
 
-        col_h1, col_h2, col_h3 = st.columns(3)
-        col_h1.metric("🔥 Streak attuale",      f"{streak2} giorni")
-        col_h2.metric("📅 Giorni attivi (anno)", active_days2)
-        col_h3.metric("📊 % Consistenza",        f"{active_days2/total_days2*100:.0f}%")
-        st.markdown(heat_html2, unsafe_allow_html=True)
-        # Legenda colori sport
-        st.markdown("<div style='display:flex;flex-wrap:wrap;gap:8px;margin-top:6px'>", unsafe_allow_html=True)
-        leg_parts = []
-        for sp in sorted(df["type"].unique()):
-            si_leg = get_sport_info(sp)
-            leg_parts.append(f'<span style="display:inline-flex;align-items:center;gap:4px;font-size:11px;color:#888"><div style="width:10px;height:10px;border-radius:50%;background:{si_leg['color']}"></div>{si_leg['icon']} {si_leg['label']}</span>')
-        st.markdown(" ".join(leg_parts) + "</div>", unsafe_allow_html=True)
+        # Legenda
+        _legs = []
+        for _sp in sorted(df["type"].unique()):
+            _sil = get_sport_info(_sp)
+            _legs.append(f'<span style="display:inline-flex;align-items:center;gap:4px;font-size:11px;color:#888;margin:2px 6px">'
+                         f'<div style="width:10px;height:10px;border-radius:50%;background:{_sil["color"]}"></div>'
+                         f'{_sil["icon"]} {_sil["label"]}</span>')
+        st.markdown('<div style="display:flex;flex-wrap:wrap;margin-top:6px">' + "".join(_legs) + "</div>",
+                    unsafe_allow_html=True)
+
     # ============================================================
     # COACH CHAT
     # ============================================================
