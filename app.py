@@ -1271,6 +1271,186 @@ def get_ringconn_context(df_vitals, df_sleep, days=7) -> str:
         if pd.notna(avg_deep): lines.append(f"Deep sleep: {avg_deep:.0f}%")
     return "\n".join(lines)
 
+
+def build_athlete_snapshot(df, u, current_ctl, current_atl, current_tsb, status_label,
+                            ctl_daily, atl_daily, tsb_daily,
+                            vo2max_val, acwr_v2, hrv_slope, slr, circadian,
+                            tss_budget, readiness, rc_vitals, rc_sleep) -> str:
+    """
+    Costruisce un contesto completo (~2000 token) per il Coach AI.
+    Include: profilo, PMC, metriche avanzate, RingConn, zone FC,
+    riepilogo sport 90gg, tutte le attività 90gg riga per riga, record.
+    """
+    lines = ["=" * 60, "CONTESTO ATLETA — ELITE AI COACH", "=" * 60]
+
+    # ── 1. PROFILO ───────────────────────────────────────────────
+    lines.append("\n[PROFILO]")
+    lines.append(f"Peso: {u['peso']}kg | FC riposo: {u['fc_min']} bpm | FC max: {u['fc_max']} bpm | FTP: {u['ftp']}W")
+
+    # ── 2. STATO FITNESS (PMC) ────────────────────────────────────
+    lines.append("\n[FITNESS — Performance Management Chart]")
+    lines.append(f"CTL (fitness 42gg): {current_ctl:.1f} | ATL (fatica 7gg): {current_atl:.1f} | TSB (forma): {current_tsb:.1f}")
+    lines.append(f"Stato attuale: {status_label}")
+    # trend CTL ultime 4 settimane
+    try:
+        _ctl_4w = []
+        for _wi in range(4, 0, -1):
+            _d = (pd.Timestamp.now() - pd.Timedelta(weeks=_wi)).date()
+            _v = ctl_daily.get(_d)
+            if _v is not None:
+                _ctl_4w.append(f"{_v:.0f}")
+        if _ctl_4w:
+            lines.append(f"CTL trend 4 sett: {' → '.join(_ctl_4w)}")
+    except Exception:
+        pass
+
+    # ── 3. METRICHE AVANZATE ─────────────────────────────────────
+    lines.append("\n[METRICHE AVANZATE]")
+    if vo2max_val:
+        lines.append(f"VO2max stimato: {vo2max_val:.1f} ml/kg/min")
+
+    # EF trend 14gg
+    _df14 = df[df["start_date"] >= (df["start_date"].max() - pd.Timedelta(days=14))]
+    _ef_vals = []
+    for _, _r in _df14.iterrows():
+        _hr = _r.get("average_heartrate")
+        if not _hr or not pd.notna(_hr) or _hr <= 0: continue
+        if _r["type"] in ["Run","TrailRun"] and _r["distance"] > 0:
+            _pace = (_r["moving_time"]/60) / (_r["distance"]/1000)
+            _ef_vals.append(1 / (_pace * _hr / 100))
+        elif _r["type"] in ["Ride","VirtualRide","MountainBikeRide"]:
+            _w = _r.get("average_watts")
+            if _w and pd.notna(_w): _ef_vals.append(_w / _hr)
+    if _ef_vals:
+        lines.append(f"Efficienza aerobica (EF) 14gg: {float(np.mean(_ef_vals)):.3f}")
+
+    # Monotonia Banister
+    _now_ts = df["start_date"].max()
+    _daily_tss = df.groupby(df["start_date"].dt.date)["tss"].sum()
+    _last7 = [float(_daily_tss.get((_now_ts - pd.Timedelta(days=i)).date(), 0)) for i in range(7)]
+    _mono_mean = float(np.mean(_last7))
+    _mono_std  = float(np.std(_last7))
+    _monotonia = _mono_mean / _mono_std if _mono_std > 0 else 0
+    lines.append(f"Monotonia Banister (7gg): {_monotonia:.2f} ({'alta — rischio overtraining' if _monotonia > 2 else 'ok'})")
+
+    # Consistenza
+    _df21 = df[df["start_date"] >= (_now_ts - pd.Timedelta(days=21))]
+    _active_21 = len(_df21["start_date"].dt.date.unique())
+    lines.append(f"Consistenza 21gg: {_active_21}/21 giorni attivi ({_active_21/21*100:.0f}%)")
+
+    # ACWR 2.0
+    lines.append(f"ACWR 2.0: {acwr_v2['acwr_adj']:.2f} | Risk: {acwr_v2['risk']}/100 | {acwr_v2['label']}")
+
+    # HRV slope
+    if hrv_slope and hrv_slope.get("slope") is not None:
+        lines.append(f"HRV trend 14gg: {hrv_slope['slope']:+.2f} ms/gg | {hrv_slope['label']}")
+
+    # Sleep/Load ratio
+    if slr and slr.get("ratio") is not None:
+        lines.append(f"Sleep/Load ratio: {slr['ratio']:.2f} (target 0.8) | {'sotto target' if slr['ratio'] < 0.8 else 'ok'}")
+
+    # Circadian
+    if circadian and circadian.get("best_slot"):
+        lines.append(f"Finestra oraria ottimale: {circadian['best_slot']} (EF +{circadian.get('best_bonus_pct',0):.0f}% vs media)")
+
+    # Budget + Readiness
+    lines.append(f"TSS Budget oggi: {tss_budget['budget']} | {tss_budget['zone']}")
+    lines.append(f"Readiness: {readiness['score']}/100 ({readiness['label']}) | HRV: {readiness['breakdown'].get('hrv_score','N/D'):.0f}/40 Sonno: {readiness['breakdown'].get('sleep_score','N/D'):.0f}/30")
+
+    # ── 4. RINGCONN 7gg ──────────────────────────────────────────
+    lines.append("\n[RINGCONN — ULTIMI 7 GIORNI]")
+    if rc_vitals is not None and not rc_vitals.empty:
+        _rv7 = rc_vitals.tail(7)
+        _hrv_avg = _rv7["hrv_avg"].dropna().mean()
+        _hr_avg  = _rv7["hr_avg"].dropna().mean()
+        _spo2    = _rv7["spo2_avg"].dropna().mean()
+        if pd.notna(_hrv_avg): lines.append(f"HRV medio: {_hrv_avg:.0f}ms")
+        if pd.notna(_hr_avg):  lines.append(f"FC riposo media: {_hr_avg:.0f}bpm")
+        if pd.notna(_spo2):    lines.append(f"SpO2 media: {_spo2:.0f}%")
+        # HRV ieri vs baseline
+        _last_hrv = rc_vitals.iloc[-1].get("hrv_avg")
+        _base_hrv = rc_vitals.tail(30)["hrv_avg"].dropna().mean()
+        if pd.notna(_last_hrv) and pd.notna(_base_hrv):
+            lines.append(f"HRV ultima notte: {_last_hrv:.0f}ms (baseline 30gg: {_base_hrv:.0f}ms, ratio: {_last_hrv/_base_hrv*100:.0f}%)")
+    else:
+        lines.append("Dati RingConn non disponibili.")
+
+    if rc_sleep is not None and not rc_sleep.empty:
+        _rs7 = rc_sleep.tail(7)
+        _sleep_h  = _rs7["total_hours"].dropna().mean()
+        _sleep_ef = _rs7["efficiency_pct"].dropna().mean()
+        _deep     = _rs7["deep_pct"].dropna().mean()
+        if pd.notna(_sleep_h):  lines.append(f"Sonno medio: {_sleep_h:.1f}h | Efficienza: {_sleep_ef:.0f}% | Deep: {_deep:.0f}%")
+
+    rc_act = st.session_state.get("rc_activity")
+    if rc_act is not None and not rc_act.empty:
+        _steps7 = rc_act.tail(7)["steps"].dropna().mean()
+        _tdee7  = rc_act.tail(7)["calories"].dropna().mean()
+        if pd.notna(_steps7): lines.append(f"Passi medi 7gg: {_steps7:.0f} | TDEE medio: {_tdee7:.0f} kcal")
+
+    # ── 5. ZONE FC (ultime 4 settimane) ─────────────────────────
+    lines.append("\n[DISTRIBUZIONE ZONE FC — ultime 4 settimane]")
+    _df28 = df[df["start_date"] >= (_now_ts - pd.Timedelta(days=28))]
+    if not _df28.empty:
+        _zone_counts = {1:0, 2:0, 3:0, 4:0, 5:0}
+        for _, _r in _df28.iterrows():
+            _zn, _, _ = get_zone_for_activity(_r, u["fc_max"])
+            if _zn in _zone_counts: _zone_counts[_zn] += 1
+        _tot_z = sum(_zone_counts.values()) or 1
+        _zone_strs = [f"Z{z}: {cnt/_tot_z*100:.0f}%" for z, cnt in _zone_counts.items()]
+        lines.append(" | ".join(_zone_strs))
+
+    # ── 6. RIEPILOGO SPORT 90gg ───────────────────────────────────
+    lines.append("\n[RIEPILOGO SPORT — ultimi 90 giorni]")
+    _df90 = df[df["start_date"] >= (_now_ts - pd.Timedelta(days=90))]
+    for _sp in _df90["type"].value_counts().index:
+        _si   = get_sport_info(_sp)
+        _spdf = _df90[_df90["type"] == _sp]
+        _sess = len(_spdf)
+        _km   = _spdf["distance"].sum() / 1000
+        _elev = float(_spdf["total_elevation_gain"].sum() or 0)
+        _tss  = _spdf["tss"].sum()
+        _ore  = _spdf["moving_time"].sum() / 3600
+        lines.append(f"{_si['label']}: {_sess} sessioni | {_km:.0f}km | ↑{_elev:.0f}m | {_ore:.0f}h | TSS {_tss:.0f}")
+
+    # ── 7. ATTIVITÀ 90gg RIGA PER RIGA ───────────────────────────
+    lines.append("\n[ATTIVITÀ ULTIMI 90 GIORNI — dalla più recente]")
+    lines.append("Data       | Sport       | Km   | Durata  | ↑m   | FC avg/max | TSS")
+    lines.append("-" * 68)
+    for _, _r in _df90.sort_values("start_date", ascending=False).iterrows():
+        _dt   = _r["start_date"].strftime("%Y-%m-%d")
+        _sp   = _r["type"][:10]
+        _km   = _r["distance"] / 1000
+        _h    = int(_r["moving_time"] // 3600)
+        _m    = int((_r["moving_time"] % 3600) // 60)
+        _elev = int(_r.get("total_elevation_gain") or 0)
+        _hr_a = f"{_r['average_heartrate']:.0f}" if pd.notna(_r.get("average_heartrate")) else "—"
+        _hr_x = f"{_r['max_heartrate']:.0f}" if pd.notna(_r.get("max_heartrate")) else "—"
+        _tss  = f"{_r['tss']:.0f}"
+        lines.append(f"{_dt} | {_sp:<11} | {_km:5.1f} | {_h}h{_m:02d}m  | {_elev:4d} | {_hr_a}/{_hr_x:>3} | {_tss}")
+
+    # ── 8. RECORD PERSONALI ───────────────────────────────────────
+    lines.append("\n[RECORD PERSONALI]")
+    for _sp in df["type"].value_counts().index[:4]:  # top 4 sport
+        _si   = get_sport_info(_sp)
+        _spdf = df[df["type"] == _sp]
+        _max_dist = _spdf["distance"].max() / 1000
+        _max_elev = float(_spdf["total_elevation_gain"].fillna(0).max())
+        _max_tss  = _spdf["tss"].max()
+        _line = f"{_si['label']}: max {_max_dist:.1f}km | ↑{_max_elev:.0f}m | TSS {_max_tss:.0f}"
+        # best pace per corsa
+        if _sp in ("Run","TrailRun"):
+            _f5 = _spdf[_spdf["distance"] >= 5000].copy()
+            if not _f5.empty:
+                _f5["psk"] = _f5["moving_time"] / (_f5["distance"]/1000)
+                _bp = _f5["psk"].min()
+                _line += f" | best 5km {int(_bp//60)}:{int(_bp%60):02d}/km"
+        lines.append(_line)
+
+    lines.append("\n" + "=" * 60)
+    return "\n".join(lines)
+
+
 # ============================================================
 # 9. TOKEN
 # ============================================================
@@ -5346,39 +5526,67 @@ map.on('draw.delete', updateStats);
     elif menu == "💬 Coach Chat":
         st.markdown("## 💬 Parla con il tuo Coach")
 
-        col_btn, _ = st.columns([1, 5])
+        col_btn, col_info, _ = st.columns([1, 2, 4])
         with col_btn:
-            if st.button("🗑️ Pulisci", use_container_width=True):
+            if st.button("🗑️ Pulisci chat", use_container_width=True):
                 st.session_state.messages = []
+                st.session_state.pop("coach_snapshot", None)
                 st.rerun()
+        with col_info:
+            _df90_cnt = len(df[df["start_date"] >= (df["start_date"].max() - pd.Timedelta(days=90))])
+            st.caption(f"📊 Contesto: {_df90_cnt} attività 90gg · metriche avanzate · RingConn · record")
 
-        for m in st.session_state.messages:
-            with st.chat_message(m["role"]):
-                st.markdown(m["content"])
+        # Costruisci snapshot una volta sola per sessione (o se forzato)
+        if "coach_snapshot" not in st.session_state:
+            with st.spinner("Costruisco il contesto atleta..."):
+                st.session_state.coach_snapshot = build_athlete_snapshot(
+                    df=df, u=u,
+                    current_ctl=current_ctl, current_atl=current_atl,
+                    current_tsb=current_tsb, status_label=status_label,
+                    ctl_daily=ctl_daily, atl_daily=atl_daily, tsb_daily=tsb_daily,
+                    vo2max_val=vo2max_val,
+                    acwr_v2=acwr_v2, hrv_slope=hrv_slope, slr=slr,
+                    circadian=circadian, tss_budget=tss_budget,
+                    readiness=readiness, rc_vitals=rc_vitals, rc_sleep=rc_sleep,
+                )
 
-        if prompt := st.chat_input("Chiedi al tuo coach..."):
-            st.session_state.messages.append({"role": "user", "content": prompt})
+        _snapshot = st.session_state.coach_snapshot
+
+        # System prompt con snapshot completo
+        _system = (
+            "Sei un coach sportivo d'élite, esperto in fisiologia dell'esercizio, "
+            "pianificazione dell'allenamento e recupero. "
+            "Rispondi in italiano. Sii specifico, pratico e diretto. "
+            "Usa i dati forniti per dare consigli personalizzati e non generici. "
+            "Non ripetere tutti i dati che già conosci — usali per ragionare.\n\n"
+            + _snapshot
+        )
+
+        # Mostra storico messaggi
+        for msg in st.session_state.messages:
+            with st.chat_message(msg["role"]):
+                st.markdown(msg["content"])
+
+        if user_input := st.chat_input("Chiedi al tuo coach..."):
+            st.session_state.messages.append({"role": "user", "content": user_input})
             with st.chat_message("user"):
-                st.markdown(prompt)
+                st.markdown(user_input)
 
-            system_ctx = (
-                f"Sei un coach sportivo esperto, preciso e motivante. "
-                f"Dati atleta: peso {u['peso']}kg, FC riposo {u['fc_min']}, "
-                f"FC max {u['fc_max']}, FTP {u['ftp']}W. "
-                f"Stato attuale: CTL {current_ctl:.1f}, ATL {current_atl:.1f}, TSB {current_tsb:.1f}. "
-                f"Forma: {status_label}. "
-                f"Readiness RingConn: {readiness['score']}/100 ({readiness['label']}). "
-                f"Attività totali: {len(df)}. Sport più praticato: {df['type'].value_counts().index[0]}. "
-                f"Ultima sessione: {df.iloc[-1]['type']} — {df.iloc[-1]['distance']/1000:.1f}km."
-                + rc_ai_context
-            )
-            try:
-                res = ai_generate(system_ctx + "\n\nDomanda dell'atleta: " + prompt)
-            except Exception as e:
-                res = f"⚠️ Errore: {e}"
+            # Costruisci prompt con intero storico chat (multi-turno)
+            _full_prompt = _system + "\n\n"
+            for msg in st.session_state.messages:
+                _role = "Atleta" if msg["role"] == "user" else "Coach"
+                _full_prompt += f"{_role}: {msg['content']}\n"
+            _full_prompt += "Coach:"
 
             with st.chat_message("assistant"):
+                with st.spinner(""):
+                    try:
+                        res = ai_generate(_full_prompt)
+                    except Exception as e:
+                        res = f"⚠️ Errore AI: {e}"
                 st.markdown(res)
+
             st.session_state.messages.append({"role": "assistant", "content": res})
 
     # ============================================================
