@@ -9,6 +9,7 @@ folium
 streamlit-folium
 plotly
 streamlit-calendar
+openai
 
 
 
