@@ -454,6 +454,226 @@ def calc_variability_index(row):
         return round(float(np_val) / float(ap_val), 3)
     return None
 
+
+# ============================================================
+# 6d. METRICHE AVANZATE — Batch 2
+# ============================================================
+
+def calc_hrv_trend_slope(df_vitals, days=14) -> dict:
+    """
+    Calcola la pendenza lineare HRV negli ultimi N giorni.
+    Pendenza negativa sostenuta = segnale di overreaching.
+    """
+    if df_vitals is None or df_vitals.empty:
+        return None
+    recent = df_vitals.dropna(subset=["hrv_avg"]).tail(days).copy()
+    if len(recent) < 4:
+        return None
+    x = np.arange(len(recent), dtype=float)
+    y = recent["hrv_avg"].values.astype(float)
+    x_mean, y_mean = x.mean(), y.mean()
+    ss_xy = ((x - x_mean) * (y - y_mean)).sum()
+    ss_xx = ((x - x_mean) ** 2).sum()
+    slope = ss_xy / ss_xx if ss_xx > 0 else 0.0
+    y_pred = x * slope + (y_mean - slope * x_mean)
+    ss_res = ((y - y_pred) ** 2).sum()
+    ss_tot = ((y - y_mean) ** 2).sum()
+    r2     = 1 - ss_res / ss_tot if ss_tot > 0 else 0.0
+    baseline   = recent["hrv_avg"].median()
+    latest_hrv = recent["hrv_avg"].iloc[-1]
+    pct_change = (latest_hrv - baseline) / baseline * 100 if baseline > 0 else 0
+    if slope > 0.5:    label, color, emoji = "In miglioramento", "#4CAF50", "📈"
+    elif slope > -0.5: label, color, emoji = "Stabile", "#FF9800", "➡️"
+    elif slope > -1.5: label, color, emoji = "In calo lieve", "#FF5722", "📉"
+    else:              label, color, emoji = "Overreaching probabile", "#F44336", "⚠️"
+    return {
+        "slope": round(slope, 3), "r2": round(r2, 3),
+        "label": label, "color": color, "emoji": emoji,
+        "baseline": round(baseline, 1), "latest": round(latest_hrv, 1),
+        "pct_change": round(pct_change, 1),
+        "dates": recent["date"].tolist(),
+        "values": y.tolist(), "trend_line": y_pred.tolist(),
+    }
+
+
+def calc_sleep_load_ratio(df_sleep, df_strava, days=14) -> dict:
+    """
+    Sleep/Load Ratio = minuti deep sleep / TSS medio giornaliero.
+    Ideale: >= 0.8 minuti deep per ogni punto TSS.
+    """
+    if df_sleep is None or df_sleep.empty:
+        return None
+    recent_sleep  = df_sleep.tail(days).copy()
+    avg_deep_min  = recent_sleep["deep_min"].dropna().mean()
+    avg_total_min = recent_sleep["total_min"].dropna().mean()
+    avg_eff       = recent_sleep["efficiency_pct"].dropna().mean()
+    cutoff        = df_strava["start_date"].max() - timedelta(days=days)
+    recent_strava = df_strava[df_strava["start_date"] >= cutoff]
+    avg_daily_tss = recent_strava["tss"].sum() / days if days > 0 else 0
+    ratio         = avg_deep_min / avg_daily_tss if avg_daily_tss > 0 else None
+    if ratio is None:      status, color = "N/D", "#888"
+    elif ratio >= 0.8:     status, color = "Ottimale", "#4CAF50"
+    elif ratio >= 0.5:     status, color = "Sufficiente", "#FF9800"
+    else:                  status, color = "Insufficiente", "#F44336"
+    deep_target  = avg_daily_tss * 0.8
+    deep_deficit = max(0.0, deep_target - avg_deep_min)
+    tss_by_date  = df_strava.groupby(df_strava["start_date"].dt.date)["tss"].sum()
+    daily_series = []
+    for _, srow in recent_sleep.iterrows():
+        d     = srow["date"].date() if hasattr(srow["date"], "date") else srow["date"]
+        tss_d = float(tss_by_date.get(d, 0))
+        daily_series.append({
+            "date":     srow["date"],
+            "deep_min": srow.get("deep_min", np.nan),
+            "tss":      tss_d,
+            "ratio":    srow.get("deep_min", 0) / tss_d if tss_d > 0 else None,
+        })
+    return {
+        "ratio": round(ratio, 3) if ratio else None,
+        "status": status, "color": color,
+        "avg_deep_min": round(avg_deep_min, 1),
+        "avg_daily_tss": round(avg_daily_tss, 1),
+        "deep_target": round(deep_target, 1),
+        "deep_deficit": round(deep_deficit, 1),
+        "avg_total_min": round(avg_total_min, 1),
+        "avg_efficiency": round(avg_eff, 1) if not np.isnan(avg_eff) else None,
+        "daily_series": daily_series,
+    }
+
+
+def calc_circadian_performance(df) -> dict:
+    """
+    Raggruppa le attività per fascia oraria (slot 3h) e calcola
+    efficienza media (TSS/ora). Identifica la finestra ottimale.
+    """
+    df_c = df.copy()
+    df_c["hour"] = df_c["start_date"].dt.hour
+    df_c["slot"] = (df_c["hour"] // 3) * 3
+    slot_labels  = {0:"00-03",3:"03-06",6:"06-09",9:"09-12",
+                    12:"12-15",15:"15-18",18:"18-21",21:"21-24"}
+    results = []
+    for slot, grp in df_c.groupby("slot"):
+        if len(grp) < 2:
+            continue
+        avg_tss = grp["tss"].mean()
+        avg_hrs = grp["moving_time"].mean() / 3600
+        tss_hr  = avg_tss / avg_hrs if avg_hrs > 0 else 0
+        runs    = grp[grp["type"].isin(["Run","TrailRun","VirtualRun"])]
+        run_pace = None
+        if not runs.empty and runs["distance"].sum() > 0:
+            run_pace = runs["moving_time"].sum() / (runs["distance"].sum() / 1000)
+        rides  = grp[grp["type"].isin(["Ride","VirtualRide","MountainBikeRide"])]
+        r_watt = rides["average_watts"].dropna().mean() if not rides.empty else None
+        results.append({
+            "slot": slot, "label": slot_labels.get(slot, f"{slot:02d}h"),
+            "n": len(grp), "avg_tss": round(avg_tss, 1),
+            "tss_hr": round(tss_hr, 1),
+            "run_pace": round(run_pace, 1) if run_pace else None,
+            "ride_watts": round(r_watt, 1) if r_watt and not np.isnan(r_watt) else None,
+        })
+    if not results:
+        return None
+    results_df = pd.DataFrame(results)
+    eligible   = results_df[results_df["n"] >= 3] if len(results_df[results_df["n"] >= 3]) > 0 else results_df
+    best_row   = eligible.loc[eligible["tss_hr"].idxmax()]
+    worst_row  = eligible.loc[eligible["tss_hr"].idxmin()]
+    delta_pct  = ((best_row["tss_hr"] - worst_row["tss_hr"]) / worst_row["tss_hr"] * 100
+                  if worst_row["tss_hr"] > 0 else 0)
+    return {
+        "results": results, "results_df": results_df,
+        "best_slot": best_row["label"], "best_tss_hr": best_row["tss_hr"],
+        "worst_slot": worst_row["label"], "delta_pct": round(delta_pct, 1),
+    }
+
+
+def calc_acwr_v2(df, df_vitals) -> dict:
+    """ACWR pesato su HRV: se HRV basso, il rischio effettivo aumenta."""
+    acwr_base, _ = calc_acwr(df)
+    hrv_weight   = 1.0
+    hrv_now = hrv_base_val = None
+    if df_vitals is not None and not df_vitals.empty:
+        valid_v = df_vitals.dropna(subset=["hrv_avg"])
+        if not valid_v.empty:
+            hrv_base_val = valid_v["hrv_avg"].median()
+            hrv_now      = float(valid_v["hrv_avg"].iloc[-1])
+            hrv_weight   = hrv_now / hrv_base_val if hrv_base_val > 0 else 1.0
+    acwr_adj = acwr_base / hrv_weight if hrv_weight > 0 else acwr_base
+    if acwr_adj < 0.8:    risk, color, label = 10,  "#2196F3", "Undertraining"
+    elif acwr_adj < 1.0:  risk, color, label = 20,  "#4CAF50", "Zona sicura bassa"
+    elif acwr_adj < 1.3:  risk, color, label = 35,  "#8BC34A", "Zona ottimale ✅"
+    elif acwr_adj < 1.5:  risk, color, label = 60,  "#FF9800", "Attenzione ⚠️"
+    elif acwr_adj < 1.8:  risk, color, label = 80,  "#FF5722", "Rischio elevato 🔴"
+    else:                 risk, color, label = 95,  "#F44336", "Pericolo ⛔"
+    if hrv_weight < 0.85 and acwr_base > 1.2:
+        risk  = min(100, int(risk * 1.25))
+        label += " + HRV basso"
+        color  = "#F44336"
+    return {
+        "acwr_base": round(acwr_base, 3), "acwr_adj": round(acwr_adj, 3),
+        "hrv_weight": round(hrv_weight, 3), "hrv_now": hrv_now,
+        "hrv_base": hrv_base_val, "risk": risk, "color": color, "label": label,
+    }
+
+
+def calc_adaptive_tss_budget(readiness_score: float, df) -> dict:
+    """Budget TSS giornaliero adattivo basato su Readiness Score."""
+    recent_28    = df[df["start_date"] >= (df["start_date"].max() - timedelta(days=28))]
+    avg_base_tss = recent_28["tss"].sum() / 28 if not recent_28.empty else 50
+    if readiness_score >= 90:    mult = 1.40
+    elif readiness_score >= 80:  mult = 1.20
+    elif readiness_score >= 65:  mult = 1.00
+    elif readiness_score >= 50:  mult = 0.80
+    elif readiness_score >= 35:  mult = 0.55
+    else:                        mult = 0.35
+    budget     = round(avg_base_tss * mult)
+    budget_max = round(budget * 1.30)
+    if mult >= 1.2:    zone, color, advice = "Giornata HQ 🟢",  "#4CAF50", "Ottimo per sessione intensa o lungo."
+    elif mult >= 0.9:  zone, color, advice = "Normale 🟡",      "#FF9800", "Allenamento standard ai tuoi ritmi."
+    elif mult >= 0.6:  zone, color, advice = "Ridotto 🟠",      "#FF5722", "Privilegia Z1-Z2. Niente sopra soglia."
+    else:              zone, color, advice = "Solo recupero 🔴","#F44336", "Riposo attivo. Il corpo ne ha bisogno."
+    today_date  = datetime.now().date()
+    today_acts  = df[df["start_date"].dt.date == today_date]
+    tss_spent   = float(today_acts["tss"].sum())
+    remaining   = max(0.0, budget - tss_spent)
+    overspent   = max(0.0, tss_spent - budget_max)
+    return {
+        "budget": budget, "budget_max": budget_max, "multiplier": mult,
+        "zone": zone, "color": color, "advice": advice,
+        "avg_base": round(avg_base_tss, 1), "tss_spent": round(tss_spent, 1),
+        "remaining": round(remaining, 1), "overspent": round(overspent, 1),
+        "readiness": readiness_score,
+    }
+
+
+def calc_nutritional_window(df, days=7) -> list:
+    """Calcola fabbisogno nutrizionale post-workout per ogni sessione recente."""
+    cutoff  = df["start_date"].max() - timedelta(days=days)
+    recent  = df[df["start_date"] >= cutoff].copy()
+    recent  = recent.sort_values("start_date", ascending=False)
+    results = []
+    for _, row in recent.iterrows():
+        kj   = float(row.get("kilojoules") or 0)
+        kcal = kj * 0.239 if kj > 0 else float(row.get("calories") or 0)
+        if kcal < 100:
+            continue
+        hrs      = float(row.get("moving_time", 0)) / 3600
+        tss_val  = float(row.get("tss", 0))
+        elev     = float(row.get("total_elevation_gain", 0) or 0)
+        carb_r   = 0.60 if tss_val > 80 else 0.50 if tss_val > 40 else 0.40
+        carbs_g  = round(kcal * carb_r / 4)
+        prot_g   = max(20, round(kcal * 0.15 / 4))
+        water_ml = round(hrs * 500 + elev * 1.5)
+        end_min  = int(row.get("moving_time", 0) / 60)
+        win_end  = row["start_date"] + timedelta(minutes=end_min + 45)
+        results.append({
+            "data": row["start_date"].strftime("%d/%m %H:%M"),
+            "sport": row.get("type",""),
+            "kcal": round(kcal), "tss": round(tss_val, 1),
+            "carbs_g": carbs_g, "protein_g": prot_g, "water_ml": water_ml,
+            "finestra": win_end.strftime("%H:%M"),
+        })
+    return results
+
 # ============================================================
 # 6c. DIZIONARIO TOOLTIP METRICHE
 # ============================================================
@@ -959,6 +1179,14 @@ if token_ok:
     readiness = calc_readiness(_vrow, _srow, current_tsb)
     rc_ai_context = get_ringconn_context(rc_vitals, rc_sleep)
 
+    # ---- METRICHE AVANZATE BATCH 2 ----
+    hrv_slope    = calc_hrv_trend_slope(rc_vitals, days=14)
+    slr          = calc_sleep_load_ratio(rc_sleep, df, days=14)
+    circadian    = calc_circadian_performance(df)
+    acwr_v2      = calc_acwr_v2(df, rc_vitals)
+    tss_budget   = calc_adaptive_tss_budget(readiness["score"], df)
+    nutrition    = calc_nutritional_window(df, days=7)
+
     # ---- SIDEBAR ----
     with st.sidebar:
         st.markdown(f"### 🏆 Elite AI Coach")
@@ -974,6 +1202,7 @@ if token_ok:
             "📊 Dashboard",
             "😴 Recupero & Sonno",
             "💪 Stato Fisico",
+            "🧬 Metriche Avanzate",
             "📈 Recap",
             "📅 Calendario",
             "💬 Coach Chat",
@@ -1095,10 +1324,12 @@ if token_ok:
                     alert_lines.append(("🟢", "OTTIMO", f"HRV sopra baseline ({hrv_now:.0f} ms) e TSB positivo ({current_tsb:.0f}): giornata ideale per allenamento intenso.", "#4CAF50"))
                 elif hrv_ratio < 0.85:
                     alert_lines.append(("🟡", "ATTENZIONE", f"HRV ridotto ({hrv_now:.0f} ms, -{100-hrv_ratio*100:.0f}% dalla baseline): considera intensità ridotta.", "#FF9800"))
-        if acwr_val > 1.5:
-            alert_lines.append(("🔴", "RISCHIO", f"ACWR critico ({acwr_val:.2f}): rischio infortuni elevato. Riduci carico.", "#F44336"))
-        elif acwr_val > 1.3:
-            alert_lines.append(("🟠", "CARICO ALTO", f"ACWR {acwr_val:.2f}: zona di attenzione. Monitora il recupero.", "#FF5722"))
+        if acwr_v2["risk"] >= 80:
+            alert_lines.append(("🔴", "RISCHIO INFORTUNI", f"ACWR 2.0: {acwr_v2['label']} (score {acwr_v2['risk']}/100). {acwr_v2['acwr_adj']:.2f} pesato su HRV.", "#F44336"))
+        elif acwr_v2["risk"] >= 60:
+            alert_lines.append(("🟠", "CARICO ALTO", f"ACWR 2.0: {acwr_v2['label']} — riduci l'intensità.", "#FF5722"))
+        if hrv_slope is not None and "Overreaching" in hrv_slope["label"]:
+            alert_lines.append(("⚠️", "HRV IN CALO", f"Pendenza HRV: {hrv_slope['slope']:+.2f} ms/gg negli ultimi 14gg. Possibile overreaching.", "#FF5722"))
 
         for emoji, title, msg, color in alert_lines:
             st.markdown(f"""
@@ -1127,6 +1358,22 @@ if token_ok:
             c6.metric("Readiness", f"{rs['score']}/100",
                       delta=f"{rs['emoji']} {rs['label']}",
                       help="Score recupero RingConn: HRV+Sonno+Forma+SpO2")
+        # Budget TSS
+        if rc_vitals is not None or rc_sleep is not None:
+            b = tss_budget
+            st.markdown(f"""
+            <div style="background:{b['color']}12;border:1px solid {b['color']}44;
+                        border-radius:10px;padding:10px 16px;margin:6px 0;display:flex;align-items:center;gap:16px">
+                <div style="text-align:center;min-width:60px">
+                    <div style="font-size:28px;font-weight:900;color:{b['color']}">{b['budget']}</div>
+                    <div style="font-size:10px;color:#888">TSS Budget</div>
+                </div>
+                <div>
+                    <div style="font-size:13px;font-weight:700;color:{b['color']}">{b['zone']}</div>
+                    <div style="font-size:11px;color:#aaa">{b['advice']}</div>
+                    <div style="font-size:11px;color:#666">Speso oggi: {b['tss_spent']:.0f} | Rimanente: {b['remaining']:.0f}</div>
+                </div>
+            </div>""", unsafe_allow_html=True)
 
         st.divider()
 
@@ -2177,6 +2424,438 @@ Rispondi in italiano, tono professionale ma diretto, massimo 300 parole."""
     # ============================================================
     # RECAP
     # ============================================================
+
+    # ============================================================
+    # METRICHE AVANZATE
+    # ============================================================
+    elif menu == "🧬 Metriche Avanzate":
+        st.markdown("## 🧬 Metriche Avanzate")
+
+        tab_budget, tab_acwr2, tab_circadian, tab_hrv_slope, tab_slr, tab_nutrition = st.tabs([
+            "💰 TSS Budget", "⚖️ ACWR 2.0", "🕐 Circadian", "📉 HRV Trend", "🛌 Sleep/Load", "🍽️ Nutrizione"
+        ])
+
+        # ─────────────────────────────────────────────
+        # TAB 1 — ADAPTIVE TSS BUDGET
+        # ─────────────────────────────────────────────
+        with tab_budget:
+            st.markdown("### 💰 Budget TSS Adattivo Giornaliero")
+            st.caption("Il tuo 'credito energetico' per oggi, calcolato da Readiness Score + storico 28gg.")
+
+            b = tss_budget
+            # Card principale budget
+            prog_pct = min(1.0, b["tss_spent"] / b["budget"]) if b["budget"] > 0 else 0
+            over_pct = min(1.0, b["tss_spent"] / b["budget_max"]) if b["budget_max"] > 0 else 0
+            bar_color = "#4CAF50" if prog_pct < 0.8 else "#FF9800" if prog_pct < 1.0 else "#F44336"
+
+            col_card, col_detail = st.columns([1, 2])
+            with col_card:
+                st.markdown(f"""
+                <div style="background:{b['color']}15;border:2px solid {b['color']}55;
+                            border-radius:16px;padding:20px;text-align:center">
+                    <div style="font-size:13px;color:#888;margin-bottom:4px">Budget oggi</div>
+                    <div style="font-size:52px;font-weight:900;color:{b['color']}">{b['budget']}</div>
+                    <div style="font-size:12px;color:#666">TSS</div>
+                    <div style="font-size:15px;font-weight:700;color:{b['color']};margin-top:8px">{b['zone']}</div>
+                    <div style="font-size:11px;color:#888;margin-top:4px">Moltiplicatore: {b['multiplier']:.2f}x</div>
+                </div>""", unsafe_allow_html=True)
+
+            with col_detail:
+                st.markdown(f"**💡 {b['advice']}**")
+                st.markdown(f"""
+                <div style="margin:12px 0 6px;font-size:13px;color:#888">
+                    Speso oggi: <b style="color:#fff">{b['tss_spent']:.0f}</b> /
+                    Budget: <b style="color:{b['color']}">{b['budget']}</b> /
+                    Limite allerta: <b style="color:#FF9800">{b['budget_max']}</b>
+                </div>""", unsafe_allow_html=True)
+                st.markdown(f"""
+                <div style="background:rgba(255,255,255,0.06);border-radius:8px;height:14px;margin:6px 0">
+                    <div style="background:{bar_color};width:{prog_pct*100:.0f}%;height:14px;
+                                border-radius:8px;transition:width 0.4s"></div>
+                </div>""", unsafe_allow_html=True)
+
+                if b["overspent"] > 0:
+                    st.warning(f"⚠️ Hai sforato il limite di allerta di **{b['overspent']:.0f} TSS**. "
+                               f"Domani il rischio infortuni sale. Priorità al recupero.")
+                elif b["remaining"] > 0:
+                    st.success(f"✅ Hai ancora **{b['remaining']:.0f} TSS** disponibili oggi.")
+                else:
+                    st.info("Budget giornaliero raggiunto.")
+
+                ba1, ba2, ba3 = st.columns(3)
+                ba1.metric("Base media 28gg", f"{b['avg_base']:.0f} TSS/gg")
+                ba2.metric("Readiness",        f"{b['readiness']:.0f}/100")
+                ba3.metric("Rimanente",         f"{b['remaining']:.0f} TSS")
+
+            # Grafico storico budget vs speso (ultimi 14 giorni)
+            st.markdown("##### Storico budget vs TSS reale (ultimi 14 giorni)")
+            df_14 = df[df["start_date"] >= (df["start_date"].max() - timedelta(days=14))]
+            daily_spent = df_14.groupby(df_14["start_date"].dt.date)["tss"].sum().reset_index()
+            daily_spent.columns = ["date", "tss_spent"]
+            daily_spent["date"] = pd.to_datetime(daily_spent["date"])
+
+            fig_bud = go.Figure()
+            fig_bud.add_trace(go.Bar(
+                x=daily_spent["date"], y=daily_spent["tss_spent"],
+                name="TSS speso", marker_color="#2196F3", opacity=0.8,
+            ))
+            fig_bud.add_hline(y=b["budget"], line_dash="dash", line_color="#4CAF50",
+                               annotation_text=f"Budget oggi {b['budget']}", annotation_position="top left")
+            fig_bud.add_hline(y=b["budget_max"], line_dash="dot", line_color="#FF9800",
+                               annotation_text=f"Limite allerta {b['budget_max']}", annotation_position="top right")
+            fig_bud.update_layout(
+                paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                height=220, margin=dict(l=0,r=0,t=10,b=0),
+                xaxis=dict(gridcolor="rgba(255,255,255,0.05)", tickformat="%d/%m"),
+                yaxis=dict(gridcolor="rgba(255,255,255,0.05)", title="TSS"),
+                showlegend=False,
+            )
+            st.plotly_chart(fig_bud, use_container_width=True)
+
+        # ─────────────────────────────────────────────
+        # TAB 2 — ACWR 2.0
+        # ─────────────────────────────────────────────
+        with tab_acwr2:
+            st.markdown("### ⚖️ ACWR 2.0 — Rischio Pesato su Readiness Biologica")
+            st.caption("ACWR classico amplificato dall'HRV: a parità di carico, se il tuo sistema nervoso è affaticato il rischio è più alto.")
+
+            av = acwr_v2
+            col_gauge2, col_info2 = st.columns([1, 2])
+
+            with col_gauge2:
+                fig_av = go.Figure(go.Indicator(
+                    mode="gauge+number",
+                    value=av["risk"],
+                    title={"text": "Risk Score", "font": {"size": 14, "color": "#aaa"}},
+                    number={"suffix": "/100", "font": {"size": 22}},
+                    gauge={
+                        "axis": {"range": [0, 100]},
+                        "bar":  {"color": av["color"], "thickness": 0.3},
+                        "steps": [
+                            {"range": [0,  20], "color": "rgba(33,150,243,0.15)"},
+                            {"range": [20, 40], "color": "rgba(76,175,80,0.15)"},
+                            {"range": [40, 65], "color": "rgba(255,152,0,0.15)"},
+                            {"range": [65, 85], "color": "rgba(255,87,34,0.15)"},
+                            {"range": [85,100], "color": "rgba(244,67,54,0.15)"},
+                        ],
+                        "threshold": {"line": {"color": av["color"], "width": 3}, "value": av["risk"]},
+                    },
+                ))
+                fig_av.update_layout(paper_bgcolor="rgba(0,0,0,0)", height=200,
+                                     margin=dict(l=10,r=10,t=30,b=0), font={"color":"#ccc"})
+                st.plotly_chart(fig_av, use_container_width=True)
+
+            with col_info2:
+                st.markdown(f"""
+                <div style="background:{av['color']}15;border-left:4px solid {av['color']};
+                            border-radius:0 12px 12px 0;padding:16px 20px;margin-bottom:12px">
+                    <div style="font-size:20px;font-weight:900;color:{av['color']}">{av['label']}</div>
+                </div>""", unsafe_allow_html=True)
+
+                ma1, ma2, ma3 = st.columns(3)
+                ma1.metric("ACWR classico",  f"{av['acwr_base']:.2f}")
+                ma2.metric("ACWR pesato",    f"{av['acwr_adj']:.2f}",
+                           delta=f"{av['acwr_adj']-av['acwr_base']:+.2f} da HRV")
+                ma3.metric("Peso HRV",       f"{av['hrv_weight']:.2f}",
+                           delta=f"{'🔴 basso' if av['hrv_weight'] < 0.85 else '🟢 ok'}")
+
+                if av["hrv_now"] and av["hrv_base"]:
+                    st.info(f"HRV attuale: **{av['hrv_now']:.0f} ms** | Baseline: **{av['hrv_base']:.0f} ms** | "
+                            f"Rapporto: **{av['hrv_weight']:.2f}** ({'🔴 sotto baseline' if av['hrv_weight'] < 0.9 else '✅ nella norma'})")
+                elif rc_vitals is None:
+                    st.info("💍 Carica i dati RingConn per abilitare la pesatura HRV. Ora stai vedendo l'ACWR classico.")
+
+            # Storico ACWR classico vs pesato
+            st.markdown("##### Confronto ACWR classico vs pesato nel tempo")
+            _, acwr_series_data = calc_acwr(df)
+            if acwr_series_data is not None and not acwr_series_data.empty:
+                fig_acwr2 = go.Figure()
+                fig_acwr2.add_trace(go.Scatter(
+                    x=acwr_series_data.index, y=acwr_series_data.values,
+                    name="ACWR classico", line=dict(color="#2196F3", width=2),
+                ))
+                # Zona sicura
+                fig_acwr2.add_hrect(y0=0.8, y1=1.3, fillcolor="rgba(76,175,80,0.08)",
+                                     line_width=0, annotation_text="Zona sicura")
+                fig_acwr2.add_hline(y=1.5, line_dash="dash", line_color="rgba(244,67,54,0.5)",
+                                     annotation_text="Soglia rischio")
+                fig_acwr2.update_layout(
+                    paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                    height=220, margin=dict(l=0,r=0,t=10,b=0),
+                    xaxis=dict(gridcolor="rgba(255,255,255,0.05)"),
+                    yaxis=dict(gridcolor="rgba(255,255,255,0.05)", title="ACWR"),
+                    legend=dict(orientation="h", y=1.1),
+                )
+                st.plotly_chart(fig_acwr2, use_container_width=True)
+
+        # ─────────────────────────────────────────────
+        # TAB 3 — CIRCADIAN PERFORMANCE
+        # ─────────────────────────────────────────────
+        with tab_circadian:
+            st.markdown("### 🕐 Circadian Performance — Finestra Oraria Ottimale")
+            st.caption("Analisi di tutti i tuoi allenamenti Strava per fascia oraria. Scopri quando rendi di più.")
+
+            if circadian is None:
+                st.info("Servono almeno 10 attività distribuite su fasce orarie diverse.")
+            else:
+                cd = circadian
+                col_best, col_worst = st.columns(2)
+                with col_best:
+                    st.markdown(f"""
+                    <div style="background:rgba(76,175,80,0.12);border:2px solid #4CAF5055;
+                                border-radius:12px;padding:16px;text-align:center">
+                        <div style="color:#888;font-size:12px">⚡ Finestra ottimale</div>
+                        <div style="font-size:36px;font-weight:900;color:#4CAF50">{cd['best_slot']}</div>
+                        <div style="font-size:13px;color:#aaa">{cd['best_tss_hr']:.1f} TSS/ora in media</div>
+                    </div>""", unsafe_allow_html=True)
+                with col_worst:
+                    st.markdown(f"""
+                    <div style="background:rgba(244,67,54,0.08);border:2px solid #F4433633;
+                                border-radius:12px;padding:16px;text-align:center">
+                        <div style="color:#888;font-size:12px">💤 Finestra meno efficiente</div>
+                        <div style="font-size:36px;font-weight:900;color:#F44336">{cd['worst_slot']}</div>
+                        <div style="font-size:13px;color:#aaa">Delta: {cd['delta_pct']:+.0f}% rispetto alla migliore</div>
+                    </div>""", unsafe_allow_html=True)
+
+                st.markdown(f"""
+                <div style="background:rgba(33,150,243,0.08);border-left:3px solid #2196F3;
+                            border-radius:0 10px 10px 0;padding:10px 16px;margin:12px 0">
+                    <b>💡 Insight:</b> Allenarsi nella finestra {cd['best_slot']} ti rende
+                    <b style="color:#4CAF50">{cd['delta_pct']:.0f}%</b> più efficiente rispetto alla
+                    fascia {cd['worst_slot']}. Sposta le sessioni intense in questa finestra.
+                </div>""", unsafe_allow_html=True)
+
+                # Grafico a barre orizzontali TSS/ora per fascia
+                st.markdown("##### Efficienza media (TSS/ora) per fascia oraria")
+                rdf = cd["results_df"].sort_values("slot")
+                colors_cd = ["#4CAF50" if row["label"] == cd["best_slot"] else "#2196F3"
+                             for _, row in rdf.iterrows()]
+                fig_cd = go.Figure(go.Bar(
+                    y=rdf["label"], x=rdf["tss_hr"],
+                    orientation="h", marker_color=colors_cd, opacity=0.85,
+                    text=[f"n={r['n']}" for _, r in rdf.iterrows()],
+                    textposition="inside",
+                ))
+                fig_cd.update_layout(
+                    paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                    height=max(200, len(rdf)*40), margin=dict(l=0,r=0,t=10,b=0),
+                    xaxis=dict(gridcolor="rgba(255,255,255,0.05)", title="TSS/ora"),
+                    yaxis=dict(gridcolor="rgba(255,255,255,0.0)"),
+                )
+                st.plotly_chart(fig_cd, use_container_width=True)
+
+                # Tabella dettaglio
+                st.markdown("##### Dettaglio per fascia oraria")
+                display_df = cd["results_df"][["label","n","avg_tss","tss_hr","run_pace","ride_watts"]].copy()
+                display_df.columns = ["Fascia","Sessioni","TSS medio","TSS/ora","Passo (s/km)","Watt medi"]
+                st.dataframe(display_df, use_container_width=True, hide_index=True)
+
+        # ─────────────────────────────────────────────
+        # TAB 4 — HRV TREND SLOPE
+        # ─────────────────────────────────────────────
+        with tab_hrv_slope:
+            st.markdown("### 📉 HRV Trend Slope — Rilevatore di Overreaching")
+            st.caption("La pendenza della retta di regressione HRV negli ultimi 14 giorni. Calo sostenuto = segnale precoce di overtraining.")
+
+            if rc_vitals is None:
+                st.info("💍 Carica i dati RingConn (Vital Signs CSV) per abilitare questa analisi.")
+            elif hrv_slope is None:
+                st.info("Servono almeno 4 giorni di dati HRV validi.")
+            else:
+                hs = hrv_slope
+                col_hs1, col_hs2, col_hs3, col_hs4 = st.columns(4)
+                col_hs1.metric("Pendenza HRV", f"{hs['slope']:+.2f} ms/gg",
+                               delta=hs["label"], delta_color="off")
+                col_hs2.metric("HRV attuale",  f"{hs['latest']:.0f} ms")
+                col_hs3.metric("Baseline",     f"{hs['baseline']:.0f} ms")
+                col_hs4.metric("Variazione",   f"{hs['pct_change']:+.1f}%",
+                               delta_color="normal")
+
+                # Alert overreaching
+                if "Overreaching" in hs["label"]:
+                    st.error(f"⚠️ **Overreaching probabile**: HRV in calo di {abs(hs['slope']):.2f} ms/giorno "
+                             f"negli ultimi 14 giorni. Considera 2-3 giorni di recupero attivo.")
+                elif "calo" in hs["label"].lower():
+                    st.warning(f"📉 HRV in lieve calo ({hs['slope']:+.2f} ms/gg). Monitora i prossimi giorni.")
+                else:
+                    st.success(f"✅ {hs['label']} — HRV stabile o in miglioramento.")
+
+                # Grafico HRV con retta di tendenza
+                st.markdown("##### HRV giornaliero + trend lineare (14 giorni)")
+                fig_hs = go.Figure()
+                fig_hs.add_trace(go.Scatter(
+                    x=hs["dates"], y=hs["values"],
+                    name="HRV", mode="lines+markers",
+                    line=dict(color="#e94560", width=2), marker=dict(size=6),
+                ))
+                fig_hs.add_trace(go.Scatter(
+                    x=hs["dates"], y=hs["trend_line"],
+                    name=f"Trend ({hs['slope']:+.2f} ms/gg)",
+                    mode="lines", line=dict(color=hs["color"], width=2, dash="dash"),
+                ))
+                fig_hs.add_hline(y=hs["baseline"], line_dash="dot",
+                                  line_color="rgba(255,255,255,0.3)",
+                                  annotation_text=f"Baseline {hs['baseline']:.0f}ms")
+                fig_hs.update_layout(
+                    paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                    height=260, margin=dict(l=0,r=0,t=10,b=0),
+                    legend=dict(orientation="h", y=1.1),
+                    xaxis=dict(gridcolor="rgba(255,255,255,0.05)", tickformat="%d/%m"),
+                    yaxis=dict(gridcolor="rgba(255,255,255,0.05)", title="HRV (ms)"),
+                )
+                st.plotly_chart(fig_hs, use_container_width=True)
+
+                # TSS sovrapposto per contestualizzare il calo
+                st.markdown("##### TSS degli ultimi 14 giorni (confronto)")
+                df_14_hs = df[df["start_date"] >= (df["start_date"].max() - timedelta(days=14))]
+                daily_tss_hs = df_14_hs.groupby(df_14_hs["start_date"].dt.date)["tss"].sum()
+                fig_tss_hs = go.Figure(go.Bar(
+                    x=pd.to_datetime(daily_tss_hs.index), y=daily_tss_hs.values,
+                    marker_color="#2196F3", opacity=0.7, name="TSS",
+                ))
+                fig_tss_hs.update_layout(
+                    paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                    height=160, margin=dict(l=0,r=0,t=5,b=0),
+                    xaxis=dict(gridcolor="rgba(255,255,255,0.05)", tickformat="%d/%m"),
+                    yaxis=dict(gridcolor="rgba(255,255,255,0.05)", title="TSS"),
+                    showlegend=False,
+                )
+                st.plotly_chart(fig_tss_hs, use_container_width=True)
+
+        # ─────────────────────────────────────────────
+        # TAB 5 — SLEEP/LOAD RATIO
+        # ─────────────────────────────────────────────
+        with tab_slr:
+            st.markdown("### 🛌 Sleep/Load Ratio")
+            st.caption("Minuti di sonno profondo per punto TSS. Misura se stai dormendo abbastanza per il carico che stai sostenendo.")
+
+            if rc_sleep is None:
+                st.info("💍 Carica i dati RingConn (Sleep CSV) per abilitare questa analisi.")
+            elif slr is None:
+                st.info("Dati insufficienti per calcolare il ratio.")
+            else:
+                sl1, sl2, sl3, sl4 = st.columns(4)
+                sl1.metric("Sleep/Load Ratio",  f"{slr['ratio']:.2f}" if slr["ratio"] else "N/D",
+                           delta=slr["status"], delta_color="off")
+                sl2.metric("Deep sleep medio",  f"{slr['avg_deep_min']:.0f} min/notte")
+                sl3.metric("Target deep sleep", f"{slr['deep_target']:.0f} min")
+                sl4.metric("Deficit stimato",   f"{slr['deep_deficit']:.0f} min",
+                           delta_color="inverse")
+
+                # Banner stato
+                st.markdown(f"""
+                <div style="background:{slr['color']}15;border-left:4px solid {slr['color']};
+                            border-radius:0 10px 10px 0;padding:12px 18px;margin:8px 0">
+                    <b style="color:{slr['color']}">{slr['status']}</b> —
+                    <span style="color:#ccc">
+                    Per il tuo carico medio di <b>{slr['avg_daily_tss']:.0f} TSS/giorno</b>,
+                    il target è <b>{slr['deep_target']:.0f} min di deep sleep</b>.
+                    Attualmente ne fai <b>{slr['avg_deep_min']:.0f} min</b>.
+                    {"✅ Sei in equilibrio." if slr['deep_deficit'] < 5 else
+                     f"🔴 Ti mancano circa {slr['deep_deficit']:.0f} min di sonno profondo per recuperare completamente."}
+                    </span>
+                </div>""", unsafe_allow_html=True)
+
+                # Grafico giornaliero deep sleep vs TSS
+                if slr["daily_series"]:
+                    st.markdown("##### Deep sleep vs TSS per giornata")
+                    ds_df = pd.DataFrame(slr["daily_series"]).dropna(subset=["deep_min"])
+                    if not ds_df.empty:
+                        fig_sl = make_subplots(specs=[[{"secondary_y": True}]])
+                        fig_sl.add_trace(go.Bar(
+                            x=ds_df["date"], y=ds_df["deep_min"],
+                            name="Deep sleep (min)", marker_color="#1565C0", opacity=0.85,
+                        ), secondary_y=False)
+                        fig_sl.add_trace(go.Scatter(
+                            x=ds_df["date"], y=ds_df["tss"],
+                            name="TSS", mode="lines+markers",
+                            line=dict(color="#e94560", width=2), marker=dict(size=5),
+                        ), secondary_y=True)
+                        fig_sl.add_hline(y=slr["deep_target"], line_dash="dash",
+                                          line_color="rgba(76,175,80,0.6)",
+                                          annotation_text=f"Target {slr['deep_target']:.0f}min")
+                        fig_sl.update_yaxes(title_text="Deep sleep (min)", secondary_y=False,
+                                             gridcolor="rgba(255,255,255,0.05)")
+                        fig_sl.update_yaxes(title_text="TSS", secondary_y=True,
+                                             gridcolor="rgba(255,255,255,0)")
+                        fig_sl.update_layout(
+                            paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                            height=260, margin=dict(l=0,r=0,t=10,b=0),
+                            legend=dict(orientation="h", y=1.1),
+                            xaxis=dict(gridcolor="rgba(255,255,255,0.05)", tickformat="%d/%m"),
+                        )
+                        st.plotly_chart(fig_sl, use_container_width=True)
+
+        # ─────────────────────────────────────────────
+        # TAB 6 — NUTRITIONAL WINDOW
+        # ─────────────────────────────────────────────
+        with tab_nutrition:
+            st.markdown("### 🍽️ Finestra Nutrizionale Post-Workout")
+            st.caption("Stime di carboidrati, proteine e idratazione per ogni sessione recente. La finestra di 45 min è cruciale per il recupero glicogeno.")
+
+            if not nutrition:
+                st.info("Nessuna sessione recente con dati calorici disponibili.")
+            else:
+                # Card ultima sessione
+                last_n = nutrition[0]
+                si     = get_sport_info(last_n["sport"])
+                st.markdown(f"**Ultima sessione: {si['icon']} {last_n['data']}**")
+                nn1, nn2, nn3, nn4, nn5 = st.columns(5)
+                nn1.metric("Calorie",    f"{last_n['kcal']} kcal")
+                nn2.metric("Carboidrati",f"{last_n['carbs_g']} g",
+                           help="Da consumare entro 30-45 min post-workout")
+                nn3.metric("Proteine",   f"{last_n['protein_g']} g",
+                           help="Entro 2 ore per massimizzare la sintesi proteica")
+                nn4.metric("Acqua",      f"{last_n['water_ml']} ml")
+                nn5.metric("Finestra",   f"entro {last_n['finestra']}",
+                           help="Orario entro cui consumare carboidrati per ottimizzare il recupero")
+
+                st.markdown(f"""
+                <div style="background:rgba(76,175,80,0.08);border-left:3px solid #4CAF50;
+                            border-radius:0 10px 10px 0;padding:10px 16px;margin:8px 0">
+                    <b>💡 Piano recupero:</b>
+                    Entro <b>{last_n['finestra']}</b> consuma <b>{last_n['carbs_g']}g di carboidrati</b>
+                    (banana + riso o barretta). Nelle 2 ore successive, aggiungi
+                    <b>{last_n['protein_g']}g di proteine</b> (yogurt greco, uova o shake).
+                    Bevi almeno <b>{last_n['water_ml']} ml</b> per reidratarti.
+                </div>""", unsafe_allow_html=True)
+
+                st.divider()
+                st.markdown("##### Ultime sessioni")
+                nutr_display = []
+                for n in nutrition:
+                    si_n = get_sport_info(n["sport"])
+                    nutr_display.append({
+                        "Data":       n["data"],
+                        "Sport":      f"{si_n['icon']} {si_n['label']}",
+                        "Kcal":       n["kcal"],
+                        "TSS":        n["tss"],
+                        "Carbo (g)":  n["carbs_g"],
+                        "Prot. (g)":  n["protein_g"],
+                        "Acqua (ml)": n["water_ml"],
+                        "Finestra":   n["finestra"],
+                    })
+                st.dataframe(pd.DataFrame(nutr_display), use_container_width=True, hide_index=True)
+
+                # Grafico calorie per sport ultimi 7 giorni
+                st.markdown("##### Calorie bruciate per sessione")
+                nutr_df = pd.DataFrame(nutrition)
+                nutr_df["color"] = nutr_df["sport"].apply(lambda x: get_sport_info(x)["color"])
+                nutr_df["label"] = nutr_df["sport"].apply(lambda x: get_sport_info(x)["icon"])
+                fig_nutr = go.Figure(go.Bar(
+                    x=nutr_df["data"], y=nutr_df["kcal"],
+                    marker_color=nutr_df["color"].tolist(),
+                    text=nutr_df["kcal"], textposition="outside", opacity=0.85,
+                ))
+                fig_nutr.update_layout(
+                    paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                    height=220, margin=dict(l=0,r=0,t=20,b=0),
+                    xaxis=dict(gridcolor="rgba(255,255,255,0.05)"),
+                    yaxis=dict(gridcolor="rgba(255,255,255,0.05)", title="kcal"),
+                    showlegend=False,
+                )
+                st.plotly_chart(fig_nutr, use_container_width=True)
+
     elif menu == "📈 Recap":
         st.markdown("## 📈 Recap Allenamenti")
 
