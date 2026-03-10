@@ -798,33 +798,198 @@ def draw_map(encoded_polyline, height=300):
         return None
 
 
-def build_inline_map3d(encoded_polyline, mapbox_token, sport_type="", elev_gain=0,
-                       map_style="outdoors-v12", height=380) -> str:
+def build_map3d_html(encoded_polyline, mapbox_token, sport_type="", elev_gain=0,
+                     map_style="satellite-streets-v12",
+                     show_slope_map=False, compact=False) -> str:
     """
-    Costruisce HTML per mappa Mapbox GL JS 3D inline (per dettaglio attività).
-    Restituisce stringa HTML o None se polyline non disponibile.
+    Genera HTML completo per una mappa Mapbox GL JS 3D con:
+    - Terrain 3D + sky layer
+    - Tracciato GPS con glow
+    - Slope colormap sul terreno (canvas 2D via hillshade + custom raster blend)
+    - Controlli rotazione/inclinazione espliciti
+    - compact=True → mappa ridotta per inline Dashboard/Calendario
     """
     if not encoded_polyline or not mapbox_token:
         return None
     try:
         import json as _j
-        pts = polyline.decode(encoded_polyline)
+        pts    = polyline.decode(encoded_polyline)
         coords = [[lon, lat] for lat, lon in pts]
         if len(coords) < 2:
             return None
-        clon = sum(c[0] for c in coords) / len(coords)
-        clat = sum(c[1] for c in coords) / len(coords)
-        is_ski = sport_type in ["BackcountrySki","NordicSki","AlpineSki","Snowboard"]
-        line_color = "#e94560"
-        geoj = _j.dumps({"type":"Feature","properties":{},
-                         "geometry":{"type":"LineString","coordinates":coords}})
+        clon   = sum(c[0] for c in coords) / len(coords)
+        clat   = sum(c[1] for c in coords) / len(coords)
+        geoj   = _j.dumps({"type":"Feature","properties":{},
+                            "geometry":{"type":"LineString","coordinates":coords}})
         start_j = _j.dumps(coords[0])
         end_j   = _j.dumps(coords[-1])
-        terrain_js = """
-    map.addSource('dem',{'type':'raster-dem','url':'mapbox://mapbox.mapbox-terrain-dem-v1','tileSize':512,'maxzoom':14});
-    map.setTerrain({'source':'dem','exaggeration':1.8});
-    map.addLayer({'id':'sky','type':'sky','paint':{'sky-type':'atmosphere','sky-atmosphere-sun':[0,45],'sky-atmosphere-sun-intensity':15}});
+
+        # Hillshade nativo Mapbox (ombre rilievo)
+        hillshade_layer = """
+    map.addLayer({
+        id: 'hillshade',
+        type: 'hillshade',
+        source: 'dem',
+        paint: {
+            'hillshade-shadow-color': '#2a1a0a',
+            'hillshade-highlight-color': '#fff',
+            'hillshade-accent-color': '#5a3e1b',
+            'hillshade-exaggeration': 0.6,
+            'hillshade-illumination-anchor': 'map'
+        }
+    }, 'waterway-label');"""
+
+        # Slope colormap: usa mapbox-dem RGB tiles per calcolare pendenza
+        # Il tile DEM codifica altitudine come: H = -10000 + (R*256*256 + G*256 + B) * 0.1
+        # Calcoliamo il gradiente su 3x3 kernel (Sobel) in un canvas offscreen
+        # e mappiamo gradi AINEVA → colore (tutto lato client JS, zero costi)
+        slope_canvas_js = """
+    // ── SLOPE COLORMAP (Sobel su DEM terrain-rgb) ──
+    const SLOPE_COLORS = [
+        {deg: 0,  color: [0,   0,   0,   0  ]},  // trasparente sotto 3°
+        {deg: 3,  color: [21,  101, 192, 160 ]},  // blu    3-25°
+        {deg: 25, color: [255, 235, 59,  190 ]},  // giallo 25-30°
+        {deg: 30, color: [255, 152, 0,   210 ]},  // arancio 30-35°
+        {deg: 35, color: [244, 67,  54,  230 ]},  // rosso  >35°
+    ];
+
+    function degToColor(deg) {
+        if (deg < 3)  return [0,0,0,0];
+        if (deg < 25) return [21,101,192,160];
+        if (deg < 30) return [255,235,59,190];
+        if (deg < 35) return [255,152,0,210];
+        return [244,67,54,230];
+    }
+
+    function buildSlopeCanvas(imgData, tileSize) {
+        const w = tileSize, h = tileSize;
+        const src = imgData.data;
+        const out  = new Uint8ClampedArray(w * h * 4);
+        const cellSize = 30; // metri approssimativi per pixel a zoom 12
+
+        function getH(x, y) {
+            const idx = (y * w + x) * 4;
+            const R = src[idx], G = src[idx+1], B = src[idx+2];
+            return -10000 + (R*256*256 + G*256 + B) * 0.1;
+        }
+
+        for (let y = 1; y < h-1; y++) {
+            for (let x = 1; x < w-1; x++) {
+                // Sobel 3x3
+                const dzdx = (getH(x+1,y-1) + 2*getH(x+1,y) + getH(x+1,y+1)
+                            - getH(x-1,y-1) - 2*getH(x-1,y) - getH(x-1,y+1)) / (8*cellSize);
+                const dzdy = (getH(x-1,y+1) + 2*getH(x,y+1) + getH(x+1,y+1)
+                            - getH(x-1,y-1) - 2*getH(x,y-1) - getH(x+1,y-1)) / (8*cellSize);
+                const slopeDeg = Math.atan(Math.sqrt(dzdx*dzdx + dzdy*dzdy)) * 180 / Math.PI;
+                const c = degToColor(slopeDeg);
+                const oi = (y * w + x) * 4;
+                out[oi]=c[0]; out[oi+1]=c[1]; out[oi+2]=c[2]; out[oi+3]=c[3];
+            }
+        }
+        return out;
+    }
+
+    // Aggiungi slope layer come custom raster via canvas
+    const TILE_SIZE = 256;
+    const slopeCanvas = document.createElement('canvas');
+    slopeCanvas.width = slopeCanvas.height = 1; // placeholder
+
+    map.addSource('slope-src', {
+        type: 'canvas',
+        canvas: slopeCanvas,
+        coordinates: [
+            [map.getBounds().getWest(), map.getBounds().getNorth()],
+            [map.getBounds().getEast(), map.getBounds().getNorth()],
+            [map.getBounds().getEast(), map.getBounds().getSouth()],
+            [map.getBounds().getWest(), map.getBounds().getSouth()]
+        ],
+        animate: true
+    });
+    map.addLayer({
+        id: 'slope-layer',
+        type: 'raster',
+        source: 'slope-src',
+        paint: { 'raster-opacity': 0.75, 'raster-resampling': 'nearest' }
+    });
+
+    // Processa i tile DEM per costruire la slope map
+    function processDemTile(url, bounds) {
+        const img = new Image();
+        img.crossOrigin = 'anonymous';
+        img.onload = () => {
+            const c = document.createElement('canvas');
+            c.width = c.height = TILE_SIZE;
+            const ctx = c.getContext('2d');
+            ctx.drawImage(img, 0, 0, TILE_SIZE, TILE_SIZE);
+            const imgData = ctx.getImageData(0, 0, TILE_SIZE, TILE_SIZE);
+            const slopeData = buildSlopeCanvas(imgData, TILE_SIZE);
+            slopeCanvas.width  = TILE_SIZE;
+            slopeCanvas.height = TILE_SIZE;
+            const sCtx = slopeCanvas.getContext('2d');
+            const sImg = sCtx.createImageData(TILE_SIZE, TILE_SIZE);
+            sImg.data.set(slopeData);
+            sCtx.putImageData(sImg, 0, 0);
+            // Aggiorna coordinate del canvas source
+            const src = map.getSource('slope-src');
+            if (src) src.setCoordinates([
+                [bounds.getWest(), bounds.getNorth()],
+                [bounds.getEast(), bounds.getNorth()],
+                [bounds.getEast(), bounds.getSouth()],
+                [bounds.getWest(), bounds.getSouth()]
+            ]);
+        };
+        img.src = url;
+    }
+
+    function updateSlopeLayer() {
+        const zoom   = Math.floor(map.getZoom());
+        const bounds = map.getBounds();
+        const lat    = map.getCenter().lat;
+        // Tile XY
+        function lonToTile(lon, z) { return Math.floor((lon+180)/360 * Math.pow(2,z)); }
+        function latToTile(lat, z) {
+            const r = Math.PI/180;
+            return Math.floor((1 - Math.log(Math.tan(lat*r)+1/Math.cos(lat*r))/Math.PI)/2 * Math.pow(2,z));
+        }
+        const z = Math.min(zoom, 14);
+        const tx = lonToTile(map.getCenter().lng, z);
+        const ty = latToTile(map.getCenter().lat, z);
+        const url = `https://api.mapbox.com/v4/mapbox.terrain-rgb/${z}/${tx}/${ty}.pngraw?access_token=TOKEN_PLACEHOLDER`;
+        processDemTile(url, bounds);
+    }
+
+    map.on('moveend', updateSlopeLayer);
+    map.on('zoomend', updateSlopeLayer);
+    setTimeout(updateSlopeLayer, 500);
 """
+        # Sostituisce TOKEN_PLACEHOLDER con il token reale
+        slope_canvas_js = slope_canvas_js.replace("TOKEN_PLACEHOLDER", mapbox_token)
+
+        slope_legend = """
+  <div id="slope-legend" style="position:absolute;bottom:30px;left:10px;
+       background:rgba(14,17,23,0.88);color:#fff;padding:10px 14px;
+       border-radius:10px;font-size:11px;font-family:sans-serif;z-index:10;line-height:1.9">
+    <b>Pendenza terreno</b>
+    <div style="display:flex;align-items:center;gap:7px"><div style="width:11px;height:11px;border-radius:50%;background:#1565C0;flex-shrink:0"></div>3-25° percorribile</div>
+    <div style="display:flex;align-items:center;gap:7px"><div style="width:11px;height:11px;border-radius:50%;background:#FFEB3B;flex-shrink:0"></div>25-30° attenzione</div>
+    <div style="display:flex;align-items:center;gap:7px"><div style="width:11px;height:11px;border-radius:50%;background:#FF9800;flex-shrink:0"></div>30-35° rischio</div>
+    <div style="display:flex;align-items:center;gap:7px"><div style="width:11px;height:11px;border-radius:50%;background:#F44336;flex-shrink:0"></div>&gt;35° pericolo</div>
+    <div style="color:#666;font-size:10px;margin-top:4px">Soglie AINEVA</div>
+  </div>""" if show_slope_map else ""
+
+        rotate_hint = "" if compact else """
+  <div id="rotate-hint" style="position:absolute;bottom:40px;right:10px;
+       background:rgba(14,17,23,0.75);color:#aaa;padding:5px 10px;
+       border-radius:8px;font-size:10px;font-family:sans-serif;z-index:10;line-height:1.7">
+    🖱️ <b>Drag</b> pan &nbsp;|&nbsp; <b>Ctrl+drag</b> inclina<br>
+    <b>Alt+drag</b> ruota &nbsp;|&nbsp; <b>Scroll</b> zoom
+  </div>"""
+
+        pitch_val    = 55 if compact else 65
+        zoom_val     = 12
+        slope_init   = slope_canvas_js if show_slope_map else ""
+        hillshade_init = hillshade_layer if not compact else ""
+
         return f"""<!DOCTYPE html><html><head>
 <meta charset="utf-8"/>
 <link href="https://api.mapbox.com/mapbox-gl-js/v3.3.0/mapbox-gl.css" rel="stylesheet"/>
@@ -834,25 +999,91 @@ def build_inline_map3d(encoded_polyline, mapbox_token, sport_type="", elev_gain=
   #mw{{position:relative;width:100%;height:100%;}}
   #m{{position:absolute;top:0;left:0;width:100%;height:100%;}}
 </style></head><body>
-<div id="mw"><div id="m"></div></div>
+<div id="mw">
+  <div id="m"></div>
+  {slope_legend}
+  {rotate_hint}
+</div>
 <script>
 mapboxgl.accessToken='{mapbox_token}';
-const map=new mapboxgl.Map({{container:'m',style:'mapbox://styles/mapbox/{map_style}',
-  center:[{clon},{clat}],zoom:12,pitch:55,bearing:-15,antialias:true}});
-map.addControl(new mapboxgl.NavigationControl(),'top-left');
+const map=new mapboxgl.Map({{
+  container:'m',
+  style:'mapbox://styles/mapbox/{map_style}',
+  center:[{clon},{clat}],
+  zoom:{zoom_val}, pitch:{pitch_val}, bearing:-15, antialias:true
+}});
+map.addControl(new mapboxgl.NavigationControl({{'visualizePitch':true}}),'top-left');
+map.addControl(new mapboxgl.FullscreenControl(),'top-left');
 map.addControl(new mapboxgl.ScaleControl(),'bottom-right');
+map.dragRotate.enable();
+map.touchZoomRotate.enableRotation();
+
+// ── Scroll zoom: attivo con prevenzione propagazione nell'iframe ──
+map.scrollZoom.enable();
+map.scrollZoom.setWheelZoomRate(1/450);  // sensibilità standard
+const canvas = map.getCanvas();
+canvas.addEventListener('wheel', (e) => {{
+  e.stopPropagation();
+}}, {{ passive: false }});
+
+// ── Rotazione con tasto centrale del mouse (click rotella + trascina) ──
+(function() {{
+  let isMiddleDragging = false;
+  let lastX = 0;
+  let lastY = 0;
+
+  canvas.addEventListener('mousedown', (e) => {{
+    if (e.button === 1) {{   // tasto centrale = rotella
+      e.preventDefault();
+      isMiddleDragging = true;
+      lastX = e.clientX;
+      lastY = e.clientY;
+      canvas.style.cursor = 'grab';
+    }}
+  }});
+
+  window.addEventListener('mousemove', (e) => {{
+    if (!isMiddleDragging) return;
+    const dx = e.clientX - lastX;
+    const dy = e.clientY - lastY;
+    lastX = e.clientX;
+    lastY = e.clientY;
+    // dx → bearing (rotazione orizzontale), dy → pitch (inclinazione)
+    const bearing = map.getBearing() + dx * 0.5;
+    const pitch   = Math.min(85, Math.max(0, map.getPitch() - dy * 0.4));
+    map.jumpTo({{ bearing, pitch }});
+  }});
+
+  window.addEventListener('mouseup', (e) => {{
+    if (e.button === 1) {{
+      isMiddleDragging = false;
+      canvas.style.cursor = '';
+    }}
+  }});
+}})();
+
 map.on('load',()=>{{
-  {terrain_js}
-  map.addSource('r',{{type:'geojson',data:{geoj}}});
-  map.addLayer({{id:'rg',type:'line',source:'r',paint:{{'line-color':'{line_color}','line-width':14,'line-opacity':0.12,'line-blur':5}}}});
-  map.addLayer({{id:'rl',type:'line',source:'r',paint:{{'line-color':'{line_color}','line-width':4,'line-opacity':1}},layout:{{'line-cap':'round','line-join':'round'}}}});
-  new mapboxgl.Marker({{color:'#4CAF50',scale:0.9}}).setLngLat({start_j}).addTo(map);
-  new mapboxgl.Marker({{color:'#F44336',scale:0.9}}).setLngLat({end_j}).addTo(map);
-  map.flyTo({{center:[{clon},{clat}],zoom:13,pitch:55,duration:1500}});
+  map.addSource('dem',{{'type':'raster-dem','url':'mapbox://mapbox.mapbox-terrain-dem-v1','tileSize':512,'maxzoom':14}});
+  map.setTerrain({{'source':'dem','exaggeration':1.9}});
+  map.addLayer({{'id':'sky','type':'sky','paint':{{'sky-type':'atmosphere','sky-atmosphere-sun':[0,45],'sky-atmosphere-sun-intensity':15}}}});
+  {hillshade_init}
+  {slope_init}
+  map.addSource('r',{{'type':'geojson','data':{geoj}}});
+  map.addLayer({{id:'rg',type:'line',source:'r',paint:{{'line-color':'#e94560','line-width':16,'line-opacity':0.12,'line-blur':6}}}});
+  map.addLayer({{id:'rl',type:'line',source:'r',paint:{{'line-color':'#e94560','line-width':4,'line-opacity':1}},layout:{{'line-cap':'round','line-join':'round'}}}});
+  new mapboxgl.Marker({{color:'#4CAF50',scale:0.9}}).setLngLat({start_j}).setPopup(new mapboxgl.Popup().setHTML('<b>Partenza</b>')).addTo(map);
+  new mapboxgl.Marker({{color:'#F44336',scale:0.9}}).setLngLat({end_j}).setPopup(new mapboxgl.Popup().setHTML('<b>Arrivo</b>')).addTo(map);
+  map.flyTo({{center:[{clon},{clat}],zoom:13,pitch:{pitch_val},duration:1800,essential:true}});
 }});
 </script></body></html>"""
     except Exception:
         return None
+
+# Alias per compatibilità con chiamate esistenti
+def build_inline_map3d(encoded_polyline, mapbox_token, sport_type="", elev_gain=0,
+                       map_style="satellite-streets-v12", height=380) -> str:
+    return build_map3d_html(encoded_polyline, mapbox_token, sport_type=sport_type,
+                            elev_gain=elev_gain, map_style=map_style, compact=True)
 
 
 # ============================================================
@@ -1149,6 +1380,44 @@ if "code" in st.query_params and not st.session_state.strava_token_info.get("acc
     if "access_token" in res:
         st.session_state.strava_token_info = res
         st.rerun()
+
+
+# ============================================================
+# 11b. MAPBOX — Contatori globali e helper render-safe
+# ============================================================
+def _mb_init_counters():
+    """Inizializza/resetta i contatori Mapbox nella sessione."""
+    today_str = datetime.now().strftime("%Y-%m-%d")
+    month_str = datetime.now().strftime("%Y-%m")
+    if "mb_loads_session"  not in st.session_state: st.session_state.mb_loads_session  = 0
+    if "mb_loads_daily"    not in st.session_state: st.session_state.mb_loads_daily    = 0
+    if "mb_loads_monthly"  not in st.session_state: st.session_state.mb_loads_monthly  = 0
+    if "mb_loads_daily_dt" not in st.session_state: st.session_state.mb_loads_daily_dt = today_str
+    if "mb_loads_month_dt" not in st.session_state: st.session_state.mb_loads_month_dt = month_str
+    if st.session_state.mb_loads_daily_dt != today_str:
+        st.session_state.mb_loads_daily    = 0
+        st.session_state.mb_loads_daily_dt = today_str
+    if st.session_state.mb_loads_month_dt != month_str:
+        st.session_state.mb_loads_monthly  = 0
+        st.session_state.mb_loads_month_dt = month_str
+
+def mapbox_render_allowed() -> tuple:
+    """Controlla se è sicuro renderizzare una mappa. Ritorna (ok: bool, motivo: str)."""
+    _mb_init_counters()
+    if st.session_state.mb_loads_monthly >= MAPBOX_MONTHLY_LIMIT:
+        return False, f"🛑 Limite mensile raggiunto ({MAPBOX_MONTHLY_LIMIT:,} map load)."
+    if st.session_state.mb_loads_daily >= MAPBOX_DAILY_SOFT_CAP:
+        return False, f"⚠️ Soglia giornaliera raggiunta ({MAPBOX_DAILY_SOFT_CAP}). Riprendi domani."
+    if st.session_state.mb_loads_session >= MAPBOX_SESSION_CAP:
+        return False, f"⚠️ Limite sessione ({MAPBOX_SESSION_CAP}). Ricarica la pagina."
+    return True, ""
+
+def mapbox_register_load():
+    """Incrementa tutti i contatori dopo un render."""
+    _mb_init_counters()
+    st.session_state.mb_loads_session += 1
+    st.session_state.mb_loads_daily   += 1
+    st.session_state.mb_loads_monthly += 1
 
 # ============================================================
 # 12. CORE APP
@@ -2965,46 +3234,6 @@ Rispondi in italiano, tono professionale ma diretto, massimo 300 parole."""
             """)
             st.stop()
 
-        # ── Inizializza contatori uso Mapbox ──
-        today_str_mb = datetime.now().strftime("%Y-%m-%d")
-        if "mb_loads_session"  not in st.session_state:
-            st.session_state.mb_loads_session  = 0
-        if "mb_loads_daily"    not in st.session_state:
-            st.session_state.mb_loads_daily    = 0
-        if "mb_loads_daily_dt" not in st.session_state:
-            st.session_state.mb_loads_daily_dt = today_str_mb
-        if "mb_loads_monthly"  not in st.session_state:
-            st.session_state.mb_loads_monthly  = 0
-        if "mb_loads_month_dt" not in st.session_state:
-            st.session_state.mb_loads_month_dt = datetime.now().strftime("%Y-%m")
-
-        # Reset automatico contatore giornaliero
-        if st.session_state.mb_loads_daily_dt != today_str_mb:
-            st.session_state.mb_loads_daily    = 0
-            st.session_state.mb_loads_daily_dt = today_str_mb
-
-        # Reset automatico contatore mensile
-        if st.session_state.mb_loads_month_dt != datetime.now().strftime("%Y-%m"):
-            st.session_state.mb_loads_monthly  = 0
-            st.session_state.mb_loads_month_dt = datetime.now().strftime("%Y-%m")
-
-        # ── Helper render-safe ──
-        def mapbox_render_allowed() -> tuple[bool, str]:
-            """Controlla se è sicuro renderizzare una mappa Mapbox. Ritorna (ok, motivo)."""
-            if st.session_state.mb_loads_monthly >= MAPBOX_MONTHLY_LIMIT:
-                return False, f"🛑 Limite mensile raggiunto ({MAPBOX_MONTHLY_LIMIT:,} map load). Riprendi il mese prossimo."
-            if st.session_state.mb_loads_daily >= MAPBOX_DAILY_SOFT_CAP:
-                return False, f"⚠️ Soglia giornaliera di sicurezza raggiunta ({MAPBOX_DAILY_SOFT_CAP} map load). Riprendi domani o aumenta `MAPBOX_DAILY_SOFT_CAP`."
-            if st.session_state.mb_loads_session >= MAPBOX_SESSION_CAP:
-                return False, f"⚠️ Troppe mappe in questa sessione ({MAPBOX_SESSION_CAP}). Ricarica la pagina per resettare il contatore di sessione."
-            return True, ""
-
-        def mapbox_register_load():
-            """Incrementa tutti i contatori dopo un render."""
-            st.session_state.mb_loads_session  += 1
-            st.session_state.mb_loads_daily    += 1
-            st.session_state.mb_loads_monthly  += 1
-
         # ── Widget contatori in sidebar ──
         with st.sidebar:
             monthly_pct = st.session_state.mb_loads_monthly / MAPBOX_MONTHLY_LIMIT * 100
@@ -3272,193 +3501,33 @@ Rispondi in italiano, tono professionale ma diretto, massimo 300 parole."""
                     end_json      = _json.dumps(coords[-1])
 
                     # Statistiche attività
-                    km_val   = sel_row["distance"] / 1000
-                    elev_val = sel_row.get("total_elevation_gain") or 0
+                    km_val   = float(sel_row["distance"]) / 1000
+                    elev_val = float(sel_row.get("total_elevation_gain") or 0)
                     dur_val  = int(sel_row.get("moving_time") or 0)
-                    tss_val  = sel_row.get("tss") or 0
+                    tss_val  = float(sel_row.get("tss") or 0)
                     ms1,ms2,ms3,ms4 = st.columns(4)
                     ms1.metric("Distanza",   f"{km_val:.1f} km")
                     ms2.metric("Dislivello", f"{elev_val:.0f} m")
                     ms3.metric("Durata",     f"{dur_val//3600}h {(dur_val%3600)//60:02d}m")
                     ms4.metric("TSS",        f"{tss_val:.0f}")
 
-                    terrain_js = """
-                        map.addSource('mapbox-dem', {
-                            'type': 'raster-dem',
-                            'url': 'mapbox://mapbox.mapbox-terrain-dem-v1',
-                            'tileSize': 512, 'maxzoom': 14
-                        });
-                        map.setTerrain({'source': 'mapbox-dem', 'exaggeration': 1.8});
-                        map.addLayer({ 'id': 'sky', 'type': 'sky',
-                            'paint': { 'sky-type': 'atmosphere',
-                                       'sky-atmosphere-sun': [0.0, 90.0],
-                                       'sky-atmosphere-sun-intensity': 15 }});
-                    """ if show_terrain else ""
-
-                    slope_legend_display = "block" if show_slope else "none"
-                    act_name_safe = (sel_row.get('name','Attività') or 'Attività')[:25]
-                    act_icon_safe = sel_si['icon']
-
-                    html_map = f"""<!DOCTYPE html>
-<html>
-<head>
-<meta charset="utf-8"/>
-<meta name="viewport" content="initial-scale=1,maximum-scale=1,user-scalable=no"/>
-<link href="https://api.mapbox.com/mapbox-gl-js/v3.3.0/mapbox-gl.css" rel="stylesheet"/>
-<script src="https://api.mapbox.com/mapbox-gl-js/v3.3.0/mapbox-gl.js"></script>
-<style>
-  html, body {{ margin:0; padding:0; width:100%; height:100%; overflow:hidden; background:#0e1117; }}
-  #map-wrap {{ position:relative; width:100%; height:100%; }}
-  #map {{ position:absolute; top:0; left:0; width:100%; height:100%; }}
-  .legend {{
-    position:absolute; bottom:30px; left:10px; background:rgba(14,17,23,0.88);
-    color:#fff; padding:10px 14px; border-radius:10px; font-size:12px;
-    font-family:sans-serif; line-height:1.8; z-index:10;
-    display:{slope_legend_display};
-  }}
-  .legend-row {{ display:flex; align-items:center; gap:8px; }}
-  .legend-dot {{ width:12px; height:12px; border-radius:50%; flex-shrink:0; }}
-  #info-panel {{
-    position:absolute; top:10px; right:10px; background:rgba(14,17,23,0.88);
-    color:#fff; padding:12px 16px; border-radius:10px; font-size:12px;
-    font-family:sans-serif; min-width:160px; z-index:10;
-  }}
-</style>
-</head>
-<body>
-<div id="map-wrap">
-  <div id="map"></div>
-  <div class="legend">
-    <b>Pendenza</b>
-    <div class="legend-row"><div class="legend-dot" style="background:#4CAF50"></div> &lt; 25° sicuro</div>
-    <div class="legend-row"><div class="legend-dot" style="background:#FFEB3B"></div> 25-30° attenzione</div>
-    <div class="legend-row"><div class="legend-dot" style="background:#FF9800"></div> 30-35° rischio</div>
-    <div class="legend-row"><div class="legend-dot" style="background:#F44336"></div> &gt; 35° pericolo</div>
-    <div style="margin-top:6px;color:#aaa;font-size:10px">&#9888; Stima approssimativa</div>
-  </div>
-  <div id="info-panel">
-    <div style="font-weight:700;margin-bottom:6px">{act_icon_safe} {act_name_safe}</div>
-    <div>&#128207; {km_val:.1f} km</div>
-    <div>&#9968; {elev_val:.0f} m D+</div>
-    <div>&#9201; {dur_val//3600}h {(dur_val%3600)//60:02d}m</div>
-  </div>
-</div>
-<script>
-mapboxgl.accessToken = '{MAPBOX_TOKEN}';
-const map = new mapboxgl.Map({{
-    container: 'map',
-    style: 'mapbox://styles/mapbox/{map_style}',
-    center: [{center_lon}, {center_lat}],
-    zoom: 12,
-    pitch: 65,
-    bearing: -20,
-    antialias: true
-}});
-
-map.addControl(new mapboxgl.NavigationControl(), 'top-left');
-map.addControl(new mapboxgl.FullscreenControl(), 'top-left');
-map.addControl(new mapboxgl.ScaleControl(), 'bottom-right');
-
-map.on('load', () => {{
-    {terrain_js}
-
-    map.addSource('route-segments', {{
-        type: 'geojson',
-        data: {segments_json}
-    }});
-
-    map.addLayer({{
-        id: 'route-shadow',
-        type: 'line',
-        source: 'route-segments',
-        paint: {{
-            'line-color': 'rgba(0,0,0,0.5)',
-            'line-width': 8,
-            'line-blur': 4,
-            'line-translate': [2, 2]
-        }}
-    }});
-
-    map.addLayer({{
-        id: 'route-glow',
-        type: 'line',
-        source: 'route-segments',
-        paint: {{
-            'line-color': ['get', 'color'],
-            'line-width': 14,
-            'line-opacity': 0.15,
-            'line-blur': 5
-        }}
-    }});
-
-    map.addLayer({{
-        id: 'route-line',
-        type: 'line',
-        source: 'route-segments',
-        paint: {{
-            'line-color': ['get', 'color'],
-            'line-width': 4,
-            'line-opacity': 1.0
-        }},
-        layout: {{ 'line-cap': 'round', 'line-join': 'round' }}
-    }});
-
-    new mapboxgl.Marker({{ color: '#4CAF50', scale: 1.2 }})
-        .setLngLat({start_json})
-        .setPopup(new mapboxgl.Popup().setHTML('<b>Partenza</b>'))
-        .addTo(map);
-
-    new mapboxgl.Marker({{ color: '#F44336', scale: 1.2 }})
-        .setLngLat({end_json})
-        .setPopup(new mapboxgl.Popup().setHTML('<b>Arrivo</b>'))
-        .addTo(map);
-
-    map.flyTo({{
-        center: [{center_lon}, {center_lat}],
-        zoom: 13, pitch: 65, bearing: -20,
-        duration: 2000, essential: true
-    }});
-}});
-
-const popup = new mapboxgl.Popup({{ closeButton: false, closeOnClick: false }});
-map.on('mouseenter', 'route-line', (e) => {{
-    map.getCanvas().style.cursor = 'crosshair';
-    const color = e.features[0].properties.color;
-    const label = color === '#4CAF50' ? '< 25 gradi - Sicuro' :
-                  color === '#FFEB3B' ? '25-30 gradi - Attenzione' :
-                  color === '#FF9800' ? '30-35 gradi - Rischio' : '> 35 gradi - Pericolo';
-    popup.setLngLat(e.lngLat)
-         .setHTML('<div style="font-size:12px;padding:4px"><b>Pendenza:</b> ' + label + '</div>')
-         .addTo(map);
-}});
-map.on('mouseleave', 'route-line', () => {{
-    map.getCanvas().style.cursor = '';
-    popup.remove();
-}});
-</script>
-</body>
-</html>"""
-
-                    import streamlit.components.v1 as components
                     _mb_ok, _mb_reason = mapbox_render_allowed()
                     if not _mb_ok:
                         st.error(_mb_reason)
                     else:
-                        components.html(html_map, height=600, scrolling=False)
-                        mapbox_register_load()
-
-                    # Slope legend sotto mappa
-                    if show_slope:
-                        st.markdown("""
-                        <div style='display:flex;gap:20px;padding:8px 12px;background:rgba(255,255,255,0.04);
-                                    border-radius:8px;font-size:12px;margin-top:4px'>
-                            <span>📐 <b>Pendenza stimata:</b></span>
-                            <span style='color:#4CAF50'>⬤ &lt;25° sicuro</span>
-                            <span style='color:#FFEB3B'>⬤ 25-30° attenzione</span>
-                            <span style='color:#FF9800'>⬤ 30-35° rischio</span>
-                            <span style='color:#F44336'>⬤ &gt;35° pericolo</span>
-                        </div>""", unsafe_allow_html=True)
-                        st.caption("⚠️ La pendenza è stimata dalla variazione GPS planare. Per dati di pendenza precisi è necessaria quota GPS per punto (non disponibile nell'export Strava base). Per scialpinismo usa il tab Valanghe con i layer ufficiali AINEVA.")
+                        _poly = sel_row["map"]["summary_polyline"]
+                        _html = build_map3d_html(
+                            _poly, MAPBOX_TOKEN,
+                            sport_type=sel_row.get("type",""),
+                            elev_gain=elev_val,
+                            map_style=map_style,
+                            show_slope_map=show_slope,
+                            compact=False,
+                        )
+                        if _html:
+                            import streamlit.components.v1 as components
+                            components.html(_html, height=600, scrolling=False)
+                            mapbox_register_load()
 
         # ─────────────────────────────────────────────────────
         # TAB 2 — CONFRONTO TRACCIATI
@@ -3584,7 +3653,27 @@ const map = new mapboxgl.Map({{
     center: [{clon}, {clat}],
     zoom: 11, pitch: 55, bearing: -15, antialias: true
 }});
-map.addControl(new mapboxgl.NavigationControl(), 'top-left');
+map.addControl(new mapboxgl.NavigationControl({{'visualizePitch':true}}), 'top-left');
+map.dragRotate.enable();
+map.touchZoomRotate.enableRotation();
+map.scrollZoom.enable();
+map.scrollZoom.setWheelZoomRate(1/450);
+(function() {{
+  const cv = map.getCanvas();
+  cv.addEventListener('wheel', (e) => {{ e.stopPropagation(); }}, {{ passive: false }});
+  let mid = false, lx = 0, ly = 0;
+  cv.addEventListener('mousedown', (e) => {{
+    if (e.button === 1) {{ e.preventDefault(); mid = true; lx = e.clientX; ly = e.clientY; cv.style.cursor = 'grab'; }}
+  }});
+  window.addEventListener('mousemove', (e) => {{
+    if (!mid) return;
+    const dx = e.clientX - lx, dy = e.clientY - ly;
+    lx = e.clientX; ly = e.clientY;
+    map.jumpTo({{ bearing: map.getBearing() + dx * 0.5,
+                  pitch: Math.min(85, Math.max(0, map.getPitch() - dy * 0.4)) }});
+  }});
+  window.addEventListener('mouseup', (e) => {{ if (e.button === 1) {{ mid = false; cv.style.cursor = ''; }} }});
+}})();
 map.addControl(new mapboxgl.FullscreenControl(), 'top-left');
 map.addControl(new mapboxgl.ScaleControl(), 'bottom-right');
 map.on('load', () => {{
@@ -3757,7 +3846,27 @@ const map = new mapboxgl.Map({{
     center: [{clon_ski}, {clat_ski}],
     zoom: 12, pitch: 70, bearing: -10, antialias: true
 }});
-map.addControl(new mapboxgl.NavigationControl(), 'top-left');
+map.addControl(new mapboxgl.NavigationControl({{'visualizePitch':true}}), 'top-left');
+map.dragRotate.enable();
+map.touchZoomRotate.enableRotation();
+map.scrollZoom.enable();
+map.scrollZoom.setWheelZoomRate(1/450);
+(function() {{
+  const cv = map.getCanvas();
+  cv.addEventListener('wheel', (e) => {{ e.stopPropagation(); }}, {{ passive: false }});
+  let mid = false, lx = 0, ly = 0;
+  cv.addEventListener('mousedown', (e) => {{
+    if (e.button === 1) {{ e.preventDefault(); mid = true; lx = e.clientX; ly = e.clientY; cv.style.cursor = 'grab'; }}
+  }});
+  window.addEventListener('mousemove', (e) => {{
+    if (!mid) return;
+    const dx = e.clientX - lx, dy = e.clientY - ly;
+    lx = e.clientX; ly = e.clientY;
+    map.jumpTo({{ bearing: map.getBearing() + dx * 0.5,
+                  pitch: Math.min(85, Math.max(0, map.getPitch() - dy * 0.4)) }});
+  }});
+  window.addEventListener('mouseup', (e) => {{ if (e.button === 1) {{ mid = false; cv.style.cursor = ''; }} }});
+}})();
 map.addControl(new mapboxgl.FullscreenControl(), 'top-left');
 map.addControl(new mapboxgl.ScaleControl(), 'bottom-right');
 
@@ -3932,9 +4041,29 @@ const map = new mapboxgl.Map({{
     center: [{default_lon}, {default_lat}],
     zoom: 11, pitch: 60, bearing: -10, antialias: true
 }});
-map.addControl(new mapboxgl.NavigationControl(), 'top-left');
+map.addControl(new mapboxgl.NavigationControl({{'visualizePitch':true}}), 'top-left');
 map.addControl(new mapboxgl.FullscreenControl(), 'top-left');
 map.addControl(new mapboxgl.ScaleControl(), 'bottom-right');
+map.dragRotate.enable();
+map.touchZoomRotate.enableRotation();
+map.scrollZoom.enable();
+map.scrollZoom.setWheelZoomRate(1/450);
+(function() {{
+  const cv = map.getCanvas();
+  cv.addEventListener('wheel', (e) => {{ e.stopPropagation(); }}, {{ passive: false }});
+  let mid = false, lx = 0, ly = 0;
+  cv.addEventListener('mousedown', (e) => {{
+    if (e.button === 1) {{ e.preventDefault(); mid = true; lx = e.clientX; ly = e.clientY; cv.style.cursor = 'grab'; }}
+  }});
+  window.addEventListener('mousemove', (e) => {{
+    if (!mid) return;
+    const dx = e.clientX - lx, dy = e.clientY - ly;
+    lx = e.clientX; ly = e.clientY;
+    map.jumpTo({{ bearing: map.getBearing() + dx * 0.5,
+                  pitch: Math.min(85, Math.max(0, map.getPitch() - dy * 0.4)) }});
+  }});
+  window.addEventListener('mouseup', (e) => {{ if (e.button === 1) {{ mid = false; cv.style.cursor = ''; }} }});
+}})();
 
 const draw = new MapboxDraw({{
     displayControlsDefault: false,
