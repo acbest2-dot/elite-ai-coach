@@ -716,39 +716,113 @@ def refresh_token_if_needed():
     return False
 
 # ============================================================
-# 9. FETCH — Paginazione completa (tutte le attività)
+# 9. FETCH — Sistema incrementale (scarica solo le attività nuove)
 # ============================================================
-@st.cache_data(ttl=1800, show_spinner=False)   # cache 30 min — storico cambia poco
-def fetch_all_activities(access_token: str) -> list:
-    """
-    Scarica TUTTE le attività con paginazione.
-    Strava restituisce max 200 per pagina.
-    Si ferma quando arriva una pagina vuota.
-    """
-    all_acts = []
-    page     = 1
-    headers  = {"Authorization": f"Bearer {access_token}"}
-    while True:
-        r = requests.get(
-            f"https://www.strava.com/api/v3/athlete/activities"
-            f"?per_page=200&page={page}",
-            headers=headers,
-        )
-        if r.status_code != 200:
-            break
-        batch = r.json()
-        if not batch:          # pagina vuota → abbiamo tutto
-            break
-        all_acts.extend(batch)
-        if len(batch) < 200:   # ultima pagina parziale
-            break
-        page += 1
-    return all_acts
 
-@st.cache_data(ttl=300, show_spinner=False)
-def fetch_activities(access_token: str) -> list:
-    """Manteniamo questo alias per compatibilità — chiama la versione paginata."""
-    return fetch_all_activities(access_token)
+def _fetch_page(access_token: str, page: int, after_ts: int = 0) -> list:
+    """Scarica una singola pagina di attività, filtrando per timestamp se fornito."""
+    params = f"per_page=200&page={page}"
+    if after_ts:
+        params += f"&after={after_ts}"
+    r = requests.get(
+        f"https://www.strava.com/api/v3/athlete/activities?{params}",
+        headers={"Authorization": f"Bearer {access_token}"},
+    )
+    if r.status_code == 200:
+        return r.json()
+    return []
+
+
+def load_activities_incremental(access_token: str) -> list:
+    """
+    Sistema di fetch incrementale:
+    - Prima esecuzione: scarica tutto lo storico (paginazione completa)
+    - Esecuzioni successive: chiede solo le attività successive all'ultima già in cache
+      usando il parametro ?after=<unix_timestamp>
+    - Unisce le nuove attività alla cache esistente e rimuove eventuali duplicati per id
+    - Nessuna chiamata API inutile se non ci sono attività nuove
+    """
+    cache_key  = "activities_cache"
+    ts_key     = "activities_last_ts"
+    token_key  = "activities_token"    # per invalidare cache se cambia utente
+
+    existing   = st.session_state.get(cache_key, [])
+    last_ts    = st.session_state.get(ts_key, 0)
+    last_token = st.session_state.get(token_key, "")
+
+    # Se il token è cambiato (nuovo login) azzera tutto
+    if last_token != access_token[:20]:
+        existing  = []
+        last_ts   = 0
+
+    headers = {"Authorization": f"Bearer {access_token}"}
+
+    if not existing:
+        # ── PRIMO CARICAMENTO: scarica tutto con paginazione ──
+        all_acts = []
+        page = 1
+        while True:
+            batch = _fetch_page(access_token, page)
+            if not batch:
+                break
+            all_acts.extend(batch)
+            if len(batch) < 200:
+                break
+            page += 1
+        st.session_state[cache_key]  = all_acts
+        st.session_state[token_key]  = access_token[:20]
+        # Salva il timestamp dell'attività più recente
+        if all_acts:
+            import time as _time
+            # start_date delle attività Strava è ISO string → converti in unix
+            dates = []
+            for a in all_acts:
+                try:
+                    from datetime import datetime as _dt
+                    d = _dt.fromisoformat(a.get("start_date","").replace("Z",""))
+                    dates.append(int(d.timestamp()))
+                except Exception:
+                    pass
+            st.session_state[ts_key] = max(dates) if dates else 0
+        return st.session_state[cache_key]
+
+    else:
+        # ── AGGIORNAMENTO INCREMENTALE: solo le nuove ──
+        new_acts = []
+        page = 1
+        while True:
+            batch = _fetch_page(access_token, page, after_ts=last_ts)
+            if not batch:
+                break
+            new_acts.extend(batch)
+            if len(batch) < 200:
+                break
+            page += 1
+
+        if new_acts:
+            # Unisci evitando duplicati per id
+            existing_ids = {a["id"] for a in existing}
+            added = [a for a in new_acts if a["id"] not in existing_ids]
+            if added:
+                merged = existing + added
+                # Aggiorna timestamp ultimo scaricato
+                new_dates = []
+                for a in added:
+                    try:
+                        from datetime import datetime as _dt
+                        d = _dt.fromisoformat(a.get("start_date","").replace("Z",""))
+                        new_dates.append(int(d.timestamp()))
+                    except Exception:
+                        pass
+                if new_dates:
+                    st.session_state[ts_key] = max(new_dates)
+                st.session_state[cache_key] = merged
+                st.session_state[token_key] = access_token[:20]
+                return merged
+
+        # Nessuna novità — ritorna la cache invariata
+        return existing
+
 
 @st.cache_data(ttl=300)
 def fetch_athlete(access_token: str):
@@ -762,12 +836,15 @@ def fetch_athlete(access_token: str):
 # 10. SESSION STATE
 # ============================================================
 for key, val in {
-    "strava_token_info": {},
-    "messages": [],
-    "user_data": {"peso": 75.0, "fc_min": 50, "fc_max": 190, "ftp": 200},
-    "sport_filter": None,
-    "rc_vitals": None,    # DataFrame RingConn Vital Signs
-    "rc_sleep":  None,    # DataFrame RingConn Sleep
+    "strava_token_info":  {},
+    "messages":           [],
+    "user_data":          {"peso": 75.0, "fc_min": 50, "fc_max": 190, "ftp": 200},
+    "sport_filter":       None,
+    "rc_vitals":          None,    # DataFrame RingConn Vital Signs
+    "rc_sleep":           None,    # DataFrame RingConn Sleep
+    "activities_cache":   [],      # storico attività Strava (incrementale)
+    "activities_last_ts": 0,       # unix timestamp ultima attività scaricata
+    "activities_token":   "",      # fingerprint token per invalidare se cambia utente
 }.items():
     if key not in st.session_state:
         st.session_state[key] = val
@@ -793,13 +870,20 @@ if token_ok:
     access_token = st.session_state.strava_token_info["access_token"]
     athlete      = fetch_athlete(access_token)
 
-    # Primo caricamento: mostra indicatore di avanzamento
-    if "activities_loaded" not in st.session_state:
-        with st.spinner("⏳ Scaricamento storico completo da Strava (potrebbe richiedere 20-40 secondi al primo accesso)..."):
-            raw = fetch_all_activities(access_token)
-        st.session_state.activities_loaded = True
+    # Caricamento incrementale: primo accesso → tutto lo storico,
+    # accessi successivi → solo le attività nuove dall'ultima scaricata.
+    is_first_load = not st.session_state.get("activities_cache")
+    if is_first_load:
+        with st.spinner("⏳ Primo accesso: scaricamento storico completo da Strava (30-60 secondi)..."):
+            raw = load_activities_incremental(access_token)
+        n_loaded = len(raw)
+        st.toast(f"✅ {n_loaded} attività caricate dallo storico Strava", icon="🏃")
     else:
-        raw = fetch_all_activities(access_token)
+        prev_count = len(st.session_state.activities_cache)
+        raw        = load_activities_incremental(access_token)
+        new_count  = len(raw) - prev_count
+        if new_count > 0:
+            st.toast(f"🆕 {new_count} nuova/e attività sincronizzate da Strava", icon="✅")
 
     if not raw:
         st.error("Impossibile recuperare le attività.")
@@ -962,10 +1046,34 @@ if token_ok:
                     st.rerun()
 
         st.divider()
-        if st.button("🚪 Logout", use_container_width=True):
-            st.session_state.strava_token_info = {}
-            st.cache_data.clear()
-            st.rerun()
+        # Info sync + pulsante aggiornamento manuale
+        n_cached = len(st.session_state.get("activities_cache", []))
+        last_ts  = st.session_state.get("activities_last_ts", 0)
+        if n_cached:
+            st.caption(f"📦 {n_cached} attività in cache")
+            if last_ts:
+                from datetime import datetime as _dt2
+                last_dt = _dt2.fromtimestamp(last_ts).strftime("%d/%m %H:%M")
+                st.caption(f"🕐 Ultima sync: {last_dt}")
+        col_sync, col_out = st.columns(2)
+        with col_sync:
+            if st.button("🔄 Sync", use_container_width=True,
+                         help="Controlla se ci sono nuove attività su Strava"):
+                prev = len(st.session_state.get("activities_cache", []))
+                raw_new = load_activities_incremental(access_token)
+                diff = len(raw_new) - prev
+                if diff > 0:
+                    st.toast(f"🆕 {diff} nuova/e attività!", icon="✅")
+                else:
+                    st.toast("Nessuna attività nuova", icon="✅")
+                st.rerun()
+        with col_out:
+            if st.button("🚪 Esci", use_container_width=True):
+                for k in ["strava_token_info","activities_cache",
+                          "activities_last_ts","activities_token"]:
+                    st.session_state[k] = {} if k == "strava_token_info" else []  if "cache" in k else 0 if "ts" in k else ""
+                st.cache_data.clear()
+                st.rerun()
 
     # ============================================================
     # DASHBOARD
