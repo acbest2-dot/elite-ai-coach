@@ -1632,8 +1632,13 @@ if token_ok:
                 )
                 return resp.choices[0].message.content
             elif _ai_sdk_mode == "new":
+                # La nuova SDK google-genai richiede "models/" come prefisso
+                # per i modelli 1.5 quando si usa v1beta endpoint
+                _model_id = sel_model
+                if not _model_id.startswith("models/"):
+                    _model_id = f"models/{_model_id}"
                 response = _ai_client.models.generate_content(
-                    model=sel_model,
+                    model=_model_id,
                     contents=prompt,
                 )
                 return response.text
@@ -2045,34 +2050,30 @@ if token_ok:
                             components.html(_h3d, height=350, scrolling=False)
                             mapbox_register_load()
 
-        # --- AI Analisi ultima attività ---
-        st.divider()
-        st.markdown("### 🤖 Analisi Coach — Ultima Attività")
-        last    = df.iloc[-1]
-        m_last  = format_metrics(last)
-        s_last  = get_sport_info(last["type"])
-
-        with st.spinner("Il coach sta analizzando..."):
-            try:
-                ctx = (
-                    f"Sport: {last['type']} ({s_last['label']}). "
-                    f"Distanza: {m_last['dist_str']}. Durata: {m_last['dur_str']}. "
-                    f"Passo/Vel: {m_last['pace_str']}. Dislivello: {m_last['elev']}. "
-                    f"FC Media: {m_last['hr_avg']}, FC Max: {m_last['hr_max']}. "
-                    f"Watt: {m_last['watts']}. TSS: {last['tss']:.1f}. "
-                    f"CTL attuale: {current_ctl:.1f}, TSB: {current_tsb:.1f}, ATL: {current_atl:.1f}. "
-                    f"Stato forma: {status_label}."
-                )
-                prompt = (
-                    "Sei un coach sportivo di alto livello. "
-                    "Commenta questa sessione: qualità dell'allenamento, punti di forza e debolezze, "
-                    "come influisce sul carico settimanale, e suggerisci cosa fare nella prossima sessione "
-                    "in base allo stato di forma attuale. Sii specifico e pratico. Usa massimo 4 paragrafi."
-                )
-                result = ai_generate(f"{ctx}\n\n{prompt}")
-                st.info(result)
-            except Exception as e:
-                st.error(f"Errore AI: {e}")
+            # --- AI Analisi: solo per la prima attività (la più recente) ---
+            if idx == 0:
+                with st.expander("🤖 Analisi Coach", expanded=True):
+                    with st.spinner("Il coach sta analizzando..."):
+                        try:
+                            _ctx = (
+                                f"Sport: {row['type']} ({s['label']}). "
+                                f"Distanza: {m['dist_str']}. Durata: {m['dur_str']}. "
+                                f"Passo/Vel: {m['pace_str']}. Dislivello: {m['elev']}. "
+                                f"FC Media: {m['hr_avg']}, FC Max: {m['hr_max']}. "
+                                f"Watt: {m['watts']}. TSS: {row['tss']:.1f}. "
+                                f"CTL attuale: {current_ctl:.1f}, TSB: {current_tsb:.1f}, ATL: {current_atl:.1f}. "
+                                f"Stato forma: {status_label}."
+                            )
+                            _prompt = (
+                                "Sei un coach sportivo di alto livello. "
+                                "Commenta questa sessione: qualità dell'allenamento, punti di forza e debolezze, "
+                                "come influisce sul carico settimanale, e suggerisci cosa fare nella prossima sessione "
+                                "in base allo stato di forma attuale. Sii specifico e pratico. Usa massimo 4 paragrafi."
+                            )
+                            _result = ai_generate(f"{_ctx}\n\n{_prompt}")
+                            st.info(_result)
+                        except Exception as e:
+                            st.error(f"Errore AI: {e}")
 
         # --- Grafico CTL/ATL/TSB ---
         st.divider()
