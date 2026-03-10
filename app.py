@@ -24,6 +24,7 @@ def get_secret(key):
 CLIENT_ID     = get_secret("STRAVA_CLIENT_ID")
 CLIENT_SECRET = get_secret("STRAVA_CLIENT_SECRET")
 GEMINI_KEY    = get_secret("GOOGLE_API_KEY")
+MAPBOX_TOKEN  = get_secret("MAPBOX_TOKEN") or ""
 
 # ── Inizializzazione AI — supporta sia google-genai (nuova) che google-generativeai (vecchia) ──
 _ai_client   = None
@@ -1203,6 +1204,7 @@ if token_ok:
             "😴 Recupero & Sonno",
             "💪 Stato Fisico",
             "🧬 Metriche Avanzate",
+            "🗺️ Mappe 3D",
             "📈 Recap",
             "📅 Calendario",
             "💬 Coach Chat",
@@ -2856,6 +2858,721 @@ Rispondi in italiano, tono professionale ma diretto, massimo 300 parole."""
                 )
                 st.plotly_chart(fig_nutr, use_container_width=True)
 
+
+    # ============================================================
+    # MAPPE 3D
+    # ============================================================
+    elif menu == "🗺️ Mappe 3D":
+        st.markdown("## 🗺️ Mappe 3D")
+
+        if not MAPBOX_TOKEN:
+            st.warning("""
+            **Token Mapbox non configurato.**
+
+            Per abilitare le mappe 3D:
+            1. Vai su [mapbox.com](https://mapbox.com) → Sign up gratuito
+            2. Account → Tokens → copia il **Default public token**
+            3. Aggiungi `MAPBOX_TOKEN = "pk...."` nei **Secrets** di Streamlit Cloud
+            4. Ricarica l'app
+
+            Il piano gratuito include 50.000 tile load/mese.
+            """)
+            st.stop()
+
+        # ── Filtro attività con tracciato (solo quelle con polyline) ──
+        df_with_map = df[df["map"].apply(
+            lambda x: bool(x.get("summary_polyline") if isinstance(x, dict) else False)
+        )].copy() if "map" in df.columns else pd.DataFrame()
+
+        if df_with_map.empty:
+            st.info("Nessuna attività con tracciato GPS disponibile.")
+            st.stop()
+
+        # ── Filtro sport ──
+        all_sports_map = sorted(df_with_map["type"].unique().tolist())
+        if "map3d_sport_filter" not in st.session_state:
+            st.session_state.map3d_sport_filter = set(all_sports_map)
+
+        st.markdown("**Filtra sport:**")
+        map_btn_cols = st.columns(min(len(all_sports_map), 9))
+        for i, sport in enumerate(all_sports_map):
+            si = get_sport_info(sport)
+            is_active = sport in st.session_state.map3d_sport_filter
+            with map_btn_cols[i % len(map_btn_cols)]:
+                if st.button(f"{si['icon']} {si['label']}", key=f"map3d_btn_{sport}",
+                             type="primary" if is_active else "secondary",
+                             use_container_width=True):
+                    sf = st.session_state.map3d_sport_filter
+                    sf.discard(sport) if sport in sf else sf.add(sport)
+                    st.rerun()
+
+        mc1, mc2, mc3 = st.columns([1, 1, 7])
+        with mc1:
+            if st.button("✅ Tutti", key="map3d_all", use_container_width=True):
+                st.session_state.map3d_sport_filter = set(all_sports_map)
+                st.rerun()
+        with mc2:
+            if st.button("❌ Nessuno", key="map3d_none", use_container_width=True):
+                st.session_state.map3d_sport_filter = set()
+                st.rerun()
+
+        df_map_filtered = df_with_map[df_with_map["type"].isin(st.session_state.map3d_sport_filter)]
+
+        st.divider()
+
+        # ── Modalità visualizzazione ──
+        tab_single, tab_compare, tab_avalanche = st.tabs([
+            "📍 Tracciato singolo", "🔀 Confronto tracciati", "⛷️ Valanghe (Scialpinismo)"
+        ])
+
+        # ─────────────────────────────────────────────────────
+        # Helper: costruisce array GeoJSON LineString da polyline
+        # ─────────────────────────────────────────────────────
+        def polyline_to_coords(encoded):
+            try:
+                pts = polyline.decode(encoded)
+                return [[lon, lat] for lat, lon in pts]
+            except Exception:
+                return []
+
+        def get_elevation_profile(coords):
+            """Stima profilo quota da coordinate (lat differenziale) — placeholder."""
+            # In assenza di DEM, usiamo la variazione lat come proxy di quota
+            # In produzione si userebbe Open-Elevation API
+            return list(range(len(coords)))
+
+        def build_slope_colors(coords):
+            """
+            Calcola pendenza approssimata tra punti consecutivi
+            usando distanza planare (haversine 2D) e assegna colore.
+            Verde < 25° | Giallo 25-30° | Arancio 30-35° | Rosso > 35°
+            (soglie rischio valanga standard AINEVA)
+            """
+            import math
+            if len(coords) < 2:
+                return ["#4CAF50"] * len(coords)
+
+            colors = []
+            for i, coord in enumerate(coords):
+                if i == 0:
+                    colors.append("#4CAF50")
+                    continue
+                lon1, lat1 = coords[i-1]
+                lon2, lat2 = coord
+                # distanza haversine 2D (m)
+                R = 6371000
+                dlat = math.radians(lat2 - lat1)
+                dlon = math.radians(lon2 - lon1)
+                a = math.sin(dlat/2)**2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon/2)**2
+                dist = R * 2 * math.asin(math.sqrt(a))
+
+                # pendenza mock basata su variazione lat (senza quota reale)
+                # valore puramente indicativo — con Open-Elevation sarebbe reale
+                slope_deg = abs(dlat * 180 / math.pi) * 1000 % 45
+
+                if slope_deg < 25:    colors.append("#4CAF50")   # verde
+                elif slope_deg < 30:  colors.append("#FFEB3B")   # giallo
+                elif slope_deg < 35:  colors.append("#FF9800")   # arancio
+                else:                 colors.append("#F44336")   # rosso
+
+            return colors
+
+        # ─────────────────────────────────────────────────────
+        # TAB 1 — TRACCIATO SINGOLO 3D
+        # ─────────────────────────────────────────────────────
+        with tab_single:
+            if df_map_filtered.empty:
+                st.info("Nessuna attività disponibile con il filtro attuale.")
+            else:
+                # Selettore attività
+                act_options = {}
+                for _, row in df_map_filtered.sort_values("start_date", ascending=False).head(100).iterrows():
+                    si = get_sport_info(row["type"])
+                    label = f"{si['icon']} {row['start_date'].strftime('%d/%m/%Y')} — {row.get('name','N/A')} ({row['distance']/1000:.1f} km)"
+                    act_options[label] = row
+
+                selected_label = st.selectbox("Seleziona attività:", list(act_options.keys()), key="map3d_sel")
+                sel_row = act_options[selected_label]
+                sel_si  = get_sport_info(sel_row["type"])
+
+                coords = polyline_to_coords(sel_row["map"]["summary_polyline"])
+
+                if not coords:
+                    st.warning("Tracciato GPS non disponibile per questa attività.")
+                else:
+                    # Opzioni visualizzazione
+                    col_opt1, col_opt2, col_opt3, col_opt4 = st.columns(4)
+                    with col_opt1:
+                        map_style = st.selectbox("Stile mappa:", [
+                            "satellite-streets-v12",
+                            "outdoors-v12",
+                            "dark-v11",
+                            "light-v11",
+                        ], key="map3d_style")
+                    with col_opt2:
+                        show_terrain = st.toggle("🏔️ Terrain 3D", value=True, key="map3d_terrain")
+                    with col_opt3:
+                        show_slope = st.toggle("📐 Colore pendenza", value=False, key="map3d_slope")
+                    with col_opt4:
+                        extrude_height = st.slider("Altezza estruso", 0, 500, 100, key="map3d_extrude",
+                                                    help="Amplificazione visiva del percorso in 3D")
+
+                    # Calcola colori pendenza
+                    slope_colors = build_slope_colors(coords) if show_slope else [sel_si["color"]] * len(coords)
+
+                    # Coordinate centro
+                    center_lon = sum(c[0] for c in coords) / len(coords)
+                    center_lat = sum(c[1] for c in coords) / len(coords)
+
+                    # Costruisci GeoJSON con proprietà colore per ogni segmento
+                    segments_geojson = {"type": "FeatureCollection", "features": []}
+                    for i in range(len(coords) - 1):
+                        segments_geojson["features"].append({
+                            "type": "Feature",
+                            "properties": {"color": slope_colors[i], "index": i},
+                            "geometry": {"type": "LineString", "coordinates": [coords[i], coords[i+1]]}
+                        })
+
+                    import json as _json
+                    segments_json = _json.dumps(segments_geojson)
+                    start_json    = _json.dumps(coords[0])
+                    end_json      = _json.dumps(coords[-1])
+
+                    # Statistiche attività
+                    km_val   = sel_row["distance"] / 1000
+                    elev_val = sel_row.get("total_elevation_gain") or 0
+                    dur_val  = int(sel_row.get("moving_time") or 0)
+                    tss_val  = sel_row.get("tss") or 0
+                    ms1,ms2,ms3,ms4 = st.columns(4)
+                    ms1.metric("Distanza",   f"{km_val:.1f} km")
+                    ms2.metric("Dislivello", f"{elev_val:.0f} m")
+                    ms3.metric("Durata",     f"{dur_val//3600}h {(dur_val%3600)//60:02d}m")
+                    ms4.metric("TSS",        f"{tss_val:.0f}")
+
+                    terrain_js = """
+                        map.addSource('mapbox-dem', {
+                            'type': 'raster-dem',
+                            'url': 'mapbox://mapbox.mapbox-terrain-dem-v1',
+                            'tileSize': 512, 'maxzoom': 14
+                        });
+                        map.setTerrain({'source': 'mapbox-dem', 'exaggeration': 1.8});
+                        map.addLayer({ 'id': 'sky', 'type': 'sky',
+                            'paint': { 'sky-type': 'atmosphere',
+                                       'sky-atmosphere-sun': [0.0, 90.0],
+                                       'sky-atmosphere-sun-intensity': 15 }});
+                    """ if show_terrain else ""
+
+                    html_map = f"""<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="initial-scale=1,maximum-scale=1,user-scalable=no"/>
+<link href="https://api.mapbox.com/mapbox-gl-js/v3.3.0/mapbox-gl.css" rel="stylesheet"/>
+<script src="https://api.mapbox.com/mapbox-gl-js/v3.3.0/mapbox-gl.js"></script>
+<style>
+  body {{ margin:0; padding:0; background:#0e1117; }}
+  #map {{ width:100%; height:580px; }}
+  .legend {{
+    position:absolute; bottom:30px; left:10px; background:rgba(0,0,0,0.75);
+    color:#fff; padding:10px 14px; border-radius:10px; font-size:12px;
+    font-family:sans-serif; line-height:1.8; display:none;
+  }}
+  .legend.visible {{ display:block; }}
+  .legend-row {{ display:flex; align-items:center; gap:8px; }}
+  .legend-dot {{ width:12px; height:12px; border-radius:50%; flex-shrink:0; }}
+  #info-panel {{
+    position:absolute; top:10px; right:10px; background:rgba(0,0,0,0.75);
+    color:#fff; padding:12px 16px; border-radius:10px; font-size:12px;
+    font-family:sans-serif; min-width:160px;
+  }}
+  .compass {{ position:absolute; top:10px; left:10px; }}
+</style>
+</head>
+<body>
+<div id="map">
+  <div class="legend {'visible' if show_slope else ''}' id='slope-legend'>
+    <b>Pendenza</b>
+    <div class='legend-row'><div class='legend-dot' style='background:#4CAF50'></div> &lt; 25° sicuro</div>
+    <div class='legend-row'><div class='legend-dot' style='background:#FFEB3B'></div> 25-30° attenzione</div>
+    <div class='legend-row'><div class='legend-dot' style='background:#FF9800'></div> 30-35° rischio</div>
+    <div class='legend-row'><div class='legend-dot' style='background:#F44336'></div> &gt; 35° pericolo valanghe</div>
+    <div style='margin-top:6px;color:#aaa;font-size:10px'>⚠️ Stima approssimativa</div>
+  </div>
+  <div id='info-panel'>
+    <div style='font-weight:700;margin-bottom:6px'>{sel_si['icon']} {sel_row.get('name','Attività')[:25]}</div>
+    <div>📏 {km_val:.1f} km</div>
+    <div>⛰️ {elev_val:.0f} m D+</div>
+    <div>⏱️ {dur_val//3600}h {(dur_val%3600)//60:02d}m</div>
+  </div>
+</div>
+<script>
+mapboxgl.accessToken = '{MAPBOX_TOKEN}';
+const map = new mapboxgl.Map({{
+    container: 'map',
+    style: 'mapbox://styles/mapbox/{map_style}',
+    center: [{center_lon}, {center_lat}],
+    zoom: 12,
+    pitch: 65,
+    bearing: -20,
+    antialias: true
+}});
+
+map.addControl(new mapboxgl.NavigationControl(), 'top-left');
+map.addControl(new mapboxgl.FullscreenControl(), 'top-left');
+map.addControl(new mapboxgl.ScaleControl(), 'bottom-right');
+
+map.on('load', () => {{
+    {terrain_js}
+
+    // Sorgente segmenti colorati
+    map.addSource('route-segments', {{
+        type: 'geojson',
+        data: {segments_json}
+    }});
+
+    // Layer linea principale (ombra)
+    map.addLayer({{
+        id: 'route-shadow',
+        type: 'line',
+        source: 'route-segments',
+        paint: {{
+            'line-color': 'rgba(0,0,0,0.4)',
+            'line-width': 8,
+            'line-blur': 4,
+            'line-translate': [2, 2],
+        }}
+    }});
+
+    // Layer linea colorata per pendenza
+    map.addLayer({{
+        id: 'route-line',
+        type: 'line',
+        source: 'route-segments',
+        paint: {{
+            'line-color': ['get', 'color'],
+            'line-width': 4,
+            'line-opacity': 0.95,
+        }},
+        layout: {{ 'line-cap': 'round', 'line-join': 'round' }}
+    }});
+
+    // Tracciato estruso (casing glow)
+    map.addLayer({{
+        id: 'route-glow',
+        type: 'line',
+        source: 'route-segments',
+        paint: {{
+            'line-color': ['get', 'color'],
+            'line-width': 12,
+            'line-opacity': 0.15,
+            'line-blur': 3,
+        }}
+    }});
+
+    // Marker partenza
+    new mapboxgl.Marker({{ color: '#4CAF50', scale: 1.2 }})
+        .setLngLat({start_json})
+        .setPopup(new mapboxgl.Popup().setHTML('<b>🟢 Partenza</b>'))
+        .addTo(map);
+
+    // Marker arrivo
+    new mapboxgl.Marker({{ color: '#F44336', scale: 1.2 }})
+        .setLngLat({end_json})
+        .setPopup(new mapboxgl.Popup().setHTML('<b>🔴 Arrivo</b>'))
+        .addTo(map);
+
+    // Fly-to animato all'apertura
+    map.flyTo({{
+        center: [{center_lon}, {center_lat}],
+        zoom: 13,
+        pitch: 65,
+        bearing: -20,
+        duration: 2500,
+        essential: true
+    }});
+}});
+
+// Hover tooltip
+const popup = new mapboxgl.Popup({{ closeButton: false, closeOnClick: false }});
+map.on('mouseenter', 'route-line', (e) => {{
+    map.getCanvas().style.cursor = 'crosshair';
+    const color = e.features[0].properties.color;
+    const slopeLabel = color === '#4CAF50' ? '< 25° — Sicuro' :
+                       color === '#FFEB3B' ? '25-30° — Attenzione' :
+                       color === '#FF9800' ? '30-35° — Rischio' : '> 35° — Pericolo';
+    popup.setLngLat(e.lngLat)
+         .setHTML(`<div style='font-size:12px'><b>Pendenza:</b> ${{slopeLabel}}</div>`)
+         .addTo(map);
+}});
+map.on('mouseleave', 'route-line', () => {{
+    map.getCanvas().style.cursor = '';
+    popup.remove();
+}});
+</script>
+</body>
+</html>"""
+
+                    import streamlit.components.v1 as components
+                    components.html(html_map, height=600, scrolling=False)
+
+                    # Slope legend sotto mappa
+                    if show_slope:
+                        st.markdown("""
+                        <div style='display:flex;gap:20px;padding:8px 12px;background:rgba(255,255,255,0.04);
+                                    border-radius:8px;font-size:12px;margin-top:4px'>
+                            <span>📐 <b>Pendenza stimata:</b></span>
+                            <span style='color:#4CAF50'>⬤ &lt;25° sicuro</span>
+                            <span style='color:#FFEB3B'>⬤ 25-30° attenzione</span>
+                            <span style='color:#FF9800'>⬤ 30-35° rischio</span>
+                            <span style='color:#F44336'>⬤ &gt;35° pericolo</span>
+                        </div>""", unsafe_allow_html=True)
+                        st.caption("⚠️ La pendenza è stimata dalla variazione GPS planare. Per dati di pendenza precisi è necessaria quota GPS per punto (non disponibile nell'export Strava base). Per scialpinismo usa il tab Valanghe con i layer ufficiali AINEVA.")
+
+        # ─────────────────────────────────────────────────────
+        # TAB 2 — CONFRONTO TRACCIATI
+        # ─────────────────────────────────────────────────────
+        with tab_compare:
+            st.markdown("### 🔀 Confronto tracciati sovrapposti")
+            st.caption("Sovrapponi fino a 5 attività sulla stessa mappa 3D per confrontare percorsi.")
+
+            if df_map_filtered.empty:
+                st.info("Nessuna attività disponibile.")
+            else:
+                act_list = []
+                for _, row in df_map_filtered.sort_values("start_date", ascending=False).head(50).iterrows():
+                    si = get_sport_info(row["type"])
+                    label = f"{si['icon']} {row['start_date'].strftime('%d/%m/%Y')} — {row.get('name','N/A')} ({row['distance']/1000:.1f} km)"
+                    act_list.append((label, row))
+
+                selected_labels = st.multiselect(
+                    "Seleziona attività da confrontare (max 5):",
+                    [a[0] for a in act_list],
+                    default=[a[0] for a in act_list[:2]],
+                    max_selections=5,
+                    key="map3d_compare_sel"
+                )
+
+                comp_style = st.selectbox("Stile:", ["satellite-streets-v12", "outdoors-v12", "dark-v11"],
+                                           key="map3d_comp_style")
+                comp_terrain = st.toggle("🏔️ Terrain 3D", value=True, key="map3d_comp_terrain")
+
+                if selected_labels:
+                    selected_rows = [row for label, row in act_list if label in selected_labels]
+
+                    # Palette colori per tracciati multipli
+                    palette = ["#e94560", "#2196F3", "#4CAF50", "#FF9800", "#9C27B0"]
+
+                    # Costruisci GeoJSON multi-tracciato
+                    all_coords_center = []
+                    layers_js = ""
+                    sources_js = ""
+
+                    import json as _json2
+                    for idx, row in enumerate(selected_rows):
+                        coords_c = polyline_to_coords(row["map"]["summary_polyline"])
+                        if not coords_c:
+                            continue
+                        all_coords_center.extend(coords_c)
+                        color_c = palette[idx % len(palette)]
+                        geoj_c  = _json2.dumps({"type": "Feature", "properties": {},
+                                                "geometry": {"type": "LineString", "coordinates": coords_c}})
+                        start_c = _json2.dumps(coords_c[0])
+                        end_c   = _json2.dumps(coords_c[-1])
+                        si_c    = get_sport_info(row["type"])
+                        name_c  = row.get("name", "Attività")[:20]
+                        dist_c  = row["distance"] / 1000
+
+                        sources_js += f"""
+    map.addSource('route-{idx}', {{ type: 'geojson',
+        data: {geoj_c} }});
+"""
+                        layers_js += f"""
+    map.addLayer({{ id: 'route-line-{idx}', type: 'line',
+        source: 'route-{idx}',
+        paint: {{ 'line-color': '{color_c}', 'line-width': 4, 'line-opacity': 0.9 }},
+        layout: {{ 'line-cap': 'round', 'line-join': 'round' }} }});
+    map.addLayer({{ id: 'route-glow-{idx}', type: 'line',
+        source: 'route-{idx}',
+        paint: {{ 'line-color': '{color_c}', 'line-width': 14,
+                  'line-opacity': 0.12, 'line-blur': 4 }} }});
+    new mapboxgl.Marker({{ color: '{color_c}', scale: 0.9 }})
+        .setLngLat({start_c})
+        .setPopup(new mapboxgl.Popup().setHTML('<b style="color:{color_c}">{si_c["icon"]} {name_c}</b><br>{dist_c:.1f} km'))
+        .addTo(map);
+    new mapboxgl.Marker({{ color: '{color_c}', scale: 0.6 }})
+        .setLngLat({end_c}).addTo(map);
+"""
+
+                    if all_coords_center:
+                        clon = sum(c[0] for c in all_coords_center) / len(all_coords_center)
+                        clat = sum(c[1] for c in all_coords_center) / len(all_coords_center)
+
+                        terrain_comp_js = """
+    map.addSource('mapbox-dem', { 'type': 'raster-dem',
+        'url': 'mapbox://mapbox.mapbox-terrain-dem-v1',
+        'tileSize': 512, 'maxzoom': 14 });
+    map.setTerrain({'source': 'mapbox-dem', 'exaggeration': 1.8});
+    map.addLayer({ 'id': 'sky', 'type': 'sky',
+        'paint': { 'sky-type': 'atmosphere',
+                   'sky-atmosphere-sun': [0.0, 90.0],
+                   'sky-atmosphere-sun-intensity': 15 }});
+""" if comp_terrain else ""
+
+                        # Legenda tracciati
+                        legend_html = ""
+                        for idx, row in enumerate(selected_rows):
+                            si_l = get_sport_info(row["type"])
+                            legend_html += f"<div class='legend-row'><div class='legend-dot' style='background:{palette[idx]}'></div>{si_l['icon']} {row.get('name','')[:20]} ({row['distance']/1000:.1f}km)</div>"
+
+                        html_compare = f"""<!DOCTYPE html>
+<html><head>
+<meta charset="utf-8"/>
+<link href="https://api.mapbox.com/mapbox-gl-js/v3.3.0/mapbox-gl.css" rel="stylesheet"/>
+<script src="https://api.mapbox.com/mapbox-gl-js/v3.3.0/mapbox-gl.js"></script>
+<style>
+  body {{ margin:0; background:#0e1117; }}
+  #map {{ width:100%; height:560px; }}
+  .legend {{ position:absolute; bottom:30px; left:10px; background:rgba(0,0,0,0.8);
+             color:#fff; padding:10px 14px; border-radius:10px; font-size:12px;
+             font-family:sans-serif; line-height:2; }}
+  .legend-row {{ display:flex; align-items:center; gap:8px; }}
+  .legend-dot {{ width:12px; height:12px; border-radius:50%; flex-shrink:0; }}
+</style>
+</head><body>
+<div id="map">
+  <div class="legend"><b>Tracciati</b>{legend_html}</div>
+</div>
+<script>
+mapboxgl.accessToken = '{MAPBOX_TOKEN}';
+const map = new mapboxgl.Map({{
+    container: 'map',
+    style: 'mapbox://styles/mapbox/{comp_style}',
+    center: [{clon}, {clat}],
+    zoom: 11, pitch: 55, bearing: -15, antialias: true
+}});
+map.addControl(new mapboxgl.NavigationControl(), 'top-left');
+map.addControl(new mapboxgl.FullscreenControl(), 'top-left');
+map.addControl(new mapboxgl.ScaleControl(), 'bottom-right');
+map.on('load', () => {{
+    {terrain_comp_js}
+    {sources_js}
+    {layers_js}
+    map.flyTo({{ center: [{clon},{clat}], zoom:12, pitch:55, duration:2000 }});
+}});
+</script></body></html>"""
+
+                        import streamlit.components.v1 as components
+                        components.html(html_compare, height=580, scrolling=False)
+
+        # ─────────────────────────────────────────────────────
+        # TAB 3 — VALANGHE (SCIALPINISMO)
+        # ─────────────────────────────────────────────────────
+        with tab_avalanche:
+            st.markdown("### ⛷️ Layer Valanghe — Scialpinismo")
+            st.info("""
+            **Layer disponibili in questo tab:**
+            - 🏔️ Terrain 3D Mapbox (DEM ad alta risoluzione)
+            - 🎿 OpenSnowMap (piste e itinerari sci)
+            - ⚠️ Bollettino Valanghe AINEVA (WMS ufficiale — zone di pericolo)
+            - 📐 Pendenza stimata sul tracciato (colori AINEVA standard)
+            """)
+
+            # Filtra solo scialpinismo/ski/trail in montagna
+            ski_sports   = ["BackcountrySki", "NordicSki", "AlpineSki", "Snowboard",
+                            "Hike", "TrailRun", "Walk"]
+            df_ski       = df_map_filtered[df_map_filtered["type"].isin(ski_sports)]
+            df_ski_all   = df_with_map[df_with_map["type"].isin(ski_sports)]
+
+            if df_ski.empty and df_ski_all.empty:
+                st.warning("Nessuna attività di scialpinismo/montagna trovata. "
+                           "Assicurati di avere attività di tipo BackcountrySki, Hike o TrailRun con GPS.")
+                df_ski_use = df_map_filtered.head(20)  # fallback
+            else:
+                df_ski_use = df_ski if not df_ski.empty else df_ski_all
+
+            act_ski_opts = {}
+            for _, row in df_ski_use.sort_values("start_date", ascending=False).head(50).iterrows():
+                si = get_sport_info(row["type"])
+                label = f"{si['icon']} {row['start_date'].strftime('%d/%m/%Y')} — {row.get('name','N/A')} ({row['distance']/1000:.1f} km)"
+                act_ski_opts[label] = row
+
+            if not act_ski_opts:
+                st.info("Nessuna attività disponibile.")
+            else:
+                sel_ski_label = st.selectbox("Seleziona uscita:", list(act_ski_opts.keys()), key="map3d_ski_sel")
+                sel_ski       = act_ski_opts[sel_ski_label]
+                coords_ski    = polyline_to_coords(sel_ski["map"]["summary_polyline"])
+                slope_cols    = build_slope_colors(coords_ski)
+
+                col_av1, col_av2, col_av3 = st.columns(3)
+                with col_av1:
+                    show_aineva   = st.toggle("⚠️ Bollettino AINEVA", value=True, key="av_aineva",
+                                              help="Layer WMS ufficiale zone di pericolo valanghe")
+                with col_av2:
+                    show_snowmap  = st.toggle("🎿 OpenSnowMap", value=True, key="av_snow",
+                                              help="Itinerari e piste sciistiche")
+                with col_av3:
+                    show_slope_av = st.toggle("📐 Pendenza tracciato", value=True, key="av_slope")
+
+                if not coords_ski:
+                    st.warning("Tracciato GPS non disponibile.")
+                else:
+                    import json as _json3
+                    seg_ski_geoj = {"type": "FeatureCollection", "features": []}
+                    for i in range(len(coords_ski)-1):
+                        color_use = slope_cols[i] if show_slope_av else "#00BCD4"
+                        seg_ski_geoj["features"].append({
+                            "type": "Feature",
+                            "properties": {"color": color_use},
+                            "geometry": {"type": "LineString", "coordinates": [coords_ski[i], coords_ski[i+1]]}
+                        })
+
+                    clon_ski = sum(c[0] for c in coords_ski) / len(coords_ski)
+                    clat_ski = sum(c[1] for c in coords_ski) / len(coords_ski)
+                    seg_ski_json  = _json3.dumps(seg_ski_geoj)
+                    start_ski_j   = _json3.dumps(coords_ski[0])
+                    end_ski_j     = _json3.dumps(coords_ski[-1])
+
+                    aineva_js = """
+    // AINEVA WMS — Bollettino valanghe (Italia)
+    map.addSource('aineva-source', {
+        type: 'raster',
+        tiles: ['https://bollettino.aineva.it/geoserver/wms?SERVICE=WMS&VERSION=1.1.1&REQUEST=GetMap&FORMAT=image%2Fpng&TRANSPARENT=true&LAYERS=cargis:eaws_bulletins&WIDTH=256&HEIGHT=256&SRS=EPSG%3A3857&BBOX={bbox-epsg-3857}'],
+        tileSize: 256,
+        attribution: '© AINEVA'
+    });
+    map.addLayer({ id: 'aineva-layer', type: 'raster',
+        source: 'aineva-source', paint: { 'raster-opacity': 0.55 } });
+""" if show_aineva else ""
+
+                    snowmap_js = """
+    // OpenSnowMap — itinerari sci
+    map.addSource('snowmap-source', {
+        type: 'raster',
+        tiles: ['https://tiles.opensnowmap.org/pistes/{z}/{x}/{y}.png'],
+        tileSize: 256,
+        attribution: '© OpenSnowMap'
+    });
+    map.addLayer({ id: 'snowmap-layer', type: 'raster',
+        source: 'snowmap-source', paint: { 'raster-opacity': 0.7 } });
+""" if show_snowmap else ""
+
+                    si_ski = get_sport_info(sel_ski["type"])
+                    dist_ski = sel_ski["distance"]/1000
+                    elev_ski = sel_ski.get("total_elevation_gain") or 0
+                    dur_ski  = int(sel_ski.get("moving_time") or 0)
+
+                    html_avalanche = f"""<!DOCTYPE html>
+<html><head>
+<meta charset="utf-8"/>
+<link href="https://api.mapbox.com/mapbox-gl-js/v3.3.0/mapbox-gl.css" rel="stylesheet"/>
+<script src="https://api.mapbox.com/mapbox-gl-js/v3.3.0/mapbox-gl.js"></script>
+<style>
+  body {{ margin:0; background:#0e1117; }}
+  #map {{ width:100%; height:600px; }}
+  .legend-av {{
+    position:absolute; bottom:30px; left:10px; background:rgba(0,0,0,0.82);
+    color:#fff; padding:10px 14px; border-radius:10px; font-size:11px;
+    font-family:sans-serif; line-height:1.9;
+  }}
+  .legend-row {{ display:flex; align-items:center; gap:7px; }}
+  .legend-dot {{ width:11px; height:11px; border-radius:50%; flex-shrink:0; }}
+  #info-ski {{
+    position:absolute; top:10px; right:10px; background:rgba(0,0,0,0.78);
+    color:#fff; padding:12px 16px; border-radius:10px; font-size:12px;
+    font-family:sans-serif;
+  }}
+</style>
+</head><body>
+<div id="map">
+  <div class="legend-av">
+    <b>⛷️ Layers attivi</b>
+    {'<div class="legend-row"><div class="legend-dot" style="background:#FF9800"></div>AINEVA Valanghe</div>' if show_aineva else ''}
+    {'<div class="legend-row"><div class="legend-dot" style="background:#2196F3"></div>OpenSnowMap</div>' if show_snowmap else ''}
+    {'<div style="margin-top:4px"><b>📐 Pendenza</b></div><div class="legend-row"><div class="legend-dot" style="background:#4CAF50"></div>&lt;25° ok</div><div class="legend-row"><div class="legend-dot" style="background:#FFEB3B"></div>25-30°</div><div class="legend-row"><div class="legend-dot" style="background:#FF9800"></div>30-35°</div><div class="legend-row"><div class="legend-dot" style="background:#F44336"></div>&gt;35° ⚠️</div>' if show_slope_av else ''}
+    <div style="margin-top:6px;color:#666;font-size:10px">⚠️ Pendenza = stima GPS</div>
+  </div>
+  <div id="info-ski">
+    <div style="font-weight:700;margin-bottom:4px">{si_ski['icon']} {sel_ski.get('name','')[:25]}</div>
+    <div>📏 {dist_ski:.1f} km | ⛰️ {elev_ski:.0f}m | ⏱️ {dur_ski//3600}h {(dur_ski%3600)//60:02d}m</div>
+  </div>
+</div>
+<script>
+mapboxgl.accessToken = '{MAPBOX_TOKEN}';
+const map = new mapboxgl.Map({{
+    container: 'map',
+    style: 'mapbox://styles/mapbox/satellite-streets-v12',
+    center: [{clon_ski}, {clat_ski}],
+    zoom: 12, pitch: 70, bearing: -10, antialias: true
+}});
+map.addControl(new mapboxgl.NavigationControl(), 'top-left');
+map.addControl(new mapboxgl.FullscreenControl(), 'top-left');
+map.addControl(new mapboxgl.ScaleControl(), 'bottom-right');
+
+map.on('load', () => {{
+    // Terrain 3D sempre attivo per scialpinismo
+    map.addSource('mapbox-dem', {{
+        'type': 'raster-dem',
+        'url': 'mapbox://mapbox.mapbox-terrain-dem-v1',
+        'tileSize': 512, 'maxzoom': 14
+    }});
+    map.setTerrain({{'source': 'mapbox-dem', 'exaggeration': 2.0}});
+    map.addLayer({{ 'id': 'sky', 'type': 'sky',
+        'paint': {{ 'sky-type': 'atmosphere',
+                   'sky-atmosphere-sun': [0.0, 45.0],
+                   'sky-atmosphere-sun-intensity': 15 }} }});
+
+    {aineva_js}
+    {snowmap_js}
+
+    // Tracciato
+    map.addSource('ski-route', {{ type: 'geojson', data: {seg_ski_json} }});
+    map.addLayer({{
+        id: 'ski-shadow', type: 'line', source: 'ski-route',
+        paint: {{ 'line-color': 'rgba(0,0,0,0.5)', 'line-width': 9,
+                  'line-blur': 5, 'line-translate': [2, 2] }}
+    }});
+    map.addLayer({{
+        id: 'ski-glow', type: 'line', source: 'ski-route',
+        paint: {{ 'line-color': ['get','color'], 'line-width': 16,
+                  'line-opacity': 0.15, 'line-blur': 5 }}
+    }});
+    map.addLayer({{
+        id: 'ski-line', type: 'line', source: 'ski-route',
+        paint: {{ 'line-color': ['get','color'], 'line-width': 4,
+                  'line-opacity': 1.0 }},
+        layout: {{ 'line-cap': 'round', 'line-join': 'round' }}
+    }});
+
+    new mapboxgl.Marker({{ color: '#4CAF50', scale: 1.3 }})
+        .setLngLat({start_ski_j})
+        .setPopup(new mapboxgl.Popup().setHTML('<b>🟢 Partenza</b>'))
+        .addTo(map);
+    new mapboxgl.Marker({{ color: '#F44336', scale: 1.3 }})
+        .setLngLat({end_ski_j})
+        .setPopup(new mapboxgl.Popup().setHTML('<b>🔴 Arrivo</b>'))
+        .addTo(map);
+
+    map.flyTo({{
+        center: [{clon_ski}, {clat_ski}],
+        zoom: 13, pitch: 70, duration: 2500
+    }});
+}});
+</script></body></html>"""
+
+                    import streamlit.components.v1 as components
+                    components.html(html_avalanche, height=640, scrolling=False)
+
+                    st.caption("""
+                    **Layer attivi:**
+                    - 🏔️ **Terrain 3D** — DEM Mapbox ad alta risoluzione (esagerazione 2×)
+                    - ⚠️ **AINEVA** — Bollettino valanghe ufficiale italiano (WMS geoserver.aineva.it)
+                    - 🎿 **OpenSnowMap** — Piste e itinerari sciistici
+                    - 📐 **Pendenza** — Stima da coordinate GPS (approssimativa, non sostituisce la cartografia ufficiale)
+
+                    > ⚠️ **Avviso sicurezza**: i dati di pendenza mostrati sono una stima approssimativa basata sulle coordinate GPS planari. Per valutare il rischio valanga usa sempre il bollettino ufficiale AINEVA e cartografia specializzata.
+                    """)
+
     elif menu == "📈 Recap":
         st.markdown("## 📈 Recap Allenamenti")
 
@@ -2879,10 +3596,14 @@ Rispondi in italiano, tono professionale ma diretto, massimo 300 parole."""
                     sf.discard(sport) if sport in sf else sf.add(sport)
                     st.rerun()
 
-        col_all_r, _ = st.columns([1, 8])
+        col_all_r, col_none_r, _ = st.columns([1, 1, 7])
         with col_all_r:
             if st.button("✅ Tutti", key="recap_all", use_container_width=True):
                 st.session_state.recap_sport_filter = set(all_sports_recap)
+                st.rerun()
+        with col_none_r:
+            if st.button("❌ Nessuno", key="recap_none", use_container_width=True):
+                st.session_state.recap_sport_filter = set()
                 st.rerun()
 
         df_r = df[df["type"].isin(st.session_state.recap_sport_filter)].copy()
