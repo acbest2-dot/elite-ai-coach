@@ -2336,7 +2336,7 @@ if token_ok:
     # ── DETTAGLIO ATTIVITÀ — intercetta ma rispetta il menu ──────
 # Se l'utente clicca su un'altra voce del menu, il dettaglio si chiude
 _detail_menu_key = "detail_opened_from_menu"
-if st.session_state.get("selected_activity_id") is not None:
+    if st.session_state.get("selected_activity_id") is not None:
         # Se il menu è cambiato rispetto a quando è stato aperto il dettaglio,
         # chiudi il dettaglio e lascia il rendering normale del menu
         _prev_menu = st.session_state.get(_detail_menu_key)
