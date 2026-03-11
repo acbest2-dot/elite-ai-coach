@@ -2353,6 +2353,7 @@ if token_ok:
             if not _sel_row.empty:
                 render_activity_detail(
                     row=_sel_row.iloc[0], u=u,
+                    access_token=st.session_state.strava_token_info.get("access_token"),
                     MAPBOX_TOKEN=MAPBOX_TOKEN,
                     draw_map=draw_map,
                     build_inline_map3d=build_inline_map3d,
@@ -2361,7 +2362,6 @@ if token_ok:
                     ai_generate=ai_generate,
                     current_ctl=current_ctl, current_atl=current_atl,
                     current_tsb=current_tsb, status_label=status_label,
-                    access_token=st.session_state.strava_token_info.get("access_token"),
                     df=df,
                 )
                 st.stop()
