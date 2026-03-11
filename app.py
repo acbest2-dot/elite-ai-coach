@@ -377,7 +377,7 @@ def calc_zone_times_from_streams(streams, fc_max, ftp, moving_time):
 
     return hr_secs, pwr_secs
 
-def render_activity_detail(row, u, MAPBOX_TOKEN, draw_map, build_inline_map3d,
+def render_activity_detail(row, u, access_token, MAPBOX_TOKEN, draw_map, build_inline_map3d,
                             mapbox_render_allowed, mapbox_register_load, ai_generate,
                             current_ctl, current_atl, current_tsb, status_label):
     """Pagina dettaglio completa per una singola attività."""
