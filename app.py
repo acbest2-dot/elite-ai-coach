@@ -2331,6 +2331,7 @@ if token_ok:
     # DASHBOARD
     # ============================================================
     # ── DETTAGLIO ATTIVITÀ — intercetta ma rispetta il menu ──────
+<<<<<<< HEAD
 # Se l'utente clicca su un'altra voce del menu, il dettaglio si chiude
 _detail_menu_key = "detail_opened_from_menu"
 if st.session_state.get("selected_activity_id") is not None:
@@ -2365,6 +2366,42 @@ if st.session_state.get("selected_activity_id") is not None:
                 current_tsb=current_tsb, status_label=status_label, 
             )
             st.stop()
+=======
+    # Se l'utente clicca su un'altra voce del menu, il dettaglio si chiude
+    _detail_menu_key = "detail_opened_from_menu"
+    if st.session_state.get("selected_activity_id") is not None:
+        # Se il menu è cambiato rispetto a quando è stato aperto il dettaglio,
+        # chiudi il dettaglio e lascia il rendering normale del menu
+        _prev_menu = st.session_state.get(_detail_menu_key)
+        if _prev_menu is not None and _prev_menu != menu:
+            st.session_state.selected_activity_id = None
+            st.session_state.pop(_detail_menu_key, None)
+        else:
+            # Registra da quale menu è stato aperto
+            st.session_state[_detail_menu_key] = menu
+            _sel_id  = st.session_state.selected_activity_id
+            _sel_row = df[df["id"] == _sel_id] if "id" in df.columns else pd.DataFrame()
+            if _sel_row.empty:
+                try:
+                    _sel_row = df.iloc[[int(_sel_id)]]
+                except Exception:
+                    pass
+            if not _sel_row.empty:
+                render_activity_detail(
+                    row=_sel_row.iloc[0], u=u,
+                    access_token=st.session_state.strava_token_info.get("access_token"),
+                    df=df,
+                    MAPBOX_TOKEN=MAPBOX_TOKEN,
+                    draw_map=draw_map,
+                    build_inline_map3d=build_inline_map3d,
+                    mapbox_render_allowed=mapbox_render_allowed,
+                    mapbox_register_load=mapbox_register_load,
+                    ai_generate=ai_generate,
+                    current_ctl=current_ctl, current_atl=current_atl,
+                    current_tsb=current_tsb, status_label=status_label, 
+                )
+                st.stop()
+>>>>>>> parent of 20677dc (Refactor activity detail rendering logic)
 
     if menu == "📊 Dashboard":
         st.markdown("## 📊 Performance Hub")
