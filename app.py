@@ -2333,6 +2333,7 @@ if token_ok:
     # ── DETTAGLIO ATTIVITÀ — intercetta ma rispetta il menu ──────
 <<<<<<< HEAD
 <<<<<<< HEAD
+<<<<<<< HEAD
 # Se l'utente clicca su un'altra voce del menu, il dettaglio si chiude
 _detail_menu_key = "detail_opened_from_menu"
 if st.session_state.get("selected_activity_id") is not None:
@@ -2370,6 +2371,8 @@ if st.session_state.get("selected_activity_id") is not None:
 =======
 =======
 >>>>>>> parent of 20677dc (Refactor activity detail rendering logic)
+=======
+>>>>>>> parent of 20677dc (Refactor activity detail rendering logic)
     # Se l'utente clicca su un'altra voce del menu, il dettaglio si chiude
     _detail_menu_key = "detail_opened_from_menu"
     if st.session_state.get("selected_activity_id") is not None:
@@ -2405,6 +2408,9 @@ if st.session_state.get("selected_activity_id") is not None:
                 )
                 st.stop()
 <<<<<<< HEAD
+<<<<<<< HEAD
+>>>>>>> parent of 20677dc (Refactor activity detail rendering logic)
+=======
 >>>>>>> parent of 20677dc (Refactor activity detail rendering logic)
 =======
 >>>>>>> parent of 20677dc (Refactor activity detail rendering logic)
