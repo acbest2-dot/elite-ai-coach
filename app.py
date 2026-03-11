@@ -2332,6 +2332,7 @@ if token_ok:
     # ============================================================
     # ── DETTAGLIO ATTIVITÀ — intercetta ma rispetta il menu ──────
 <<<<<<< HEAD
+<<<<<<< HEAD
 # Se l'utente clicca su un'altra voce del menu, il dettaglio si chiude
 _detail_menu_key = "detail_opened_from_menu"
 if st.session_state.get("selected_activity_id") is not None:
@@ -2367,6 +2368,8 @@ if st.session_state.get("selected_activity_id") is not None:
             )
             st.stop()
 =======
+=======
+>>>>>>> parent of 20677dc (Refactor activity detail rendering logic)
     # Se l'utente clicca su un'altra voce del menu, il dettaglio si chiude
     _detail_menu_key = "detail_opened_from_menu"
     if st.session_state.get("selected_activity_id") is not None:
@@ -2401,6 +2404,9 @@ if st.session_state.get("selected_activity_id") is not None:
                     current_tsb=current_tsb, status_label=status_label, 
                 )
                 st.stop()
+<<<<<<< HEAD
+>>>>>>> parent of 20677dc (Refactor activity detail rendering logic)
+=======
 >>>>>>> parent of 20677dc (Refactor activity detail rendering logic)
 
     if menu == "📊 Dashboard":
