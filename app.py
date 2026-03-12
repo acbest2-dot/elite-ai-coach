@@ -232,9 +232,19 @@ SPORT_INFO_EXTRA = {
     "Swim":           {"icon": "🏊",  "label": "Nuoto",         "color": "#00BCD4"},
 }
 _ALL_SPORT_INFO = {**SPORT_INFO, **SPORT_INFO_EXTRA}
-PRIMARY_SPORTS = list(SPORT_INFO.keys())
+PRIMARY_SPORTS = ["Run", "TrailRun", "Ride", "MountainBikeRide",
+                  "BackcountrySki", "AlpineSki", "VirtualRide"]
+# Sport mostrati nel filtro calendario (esclude VirtualRide dal filtro visivo
+# ma mantiene il riconoscimento per statistiche)
+CALENDAR_FILTER_SPORTS = ["Run", "TrailRun", "Ride", "MountainBikeRide",
+                           "BackcountrySki", "AlpineSki"]
 
-def get_sport_info(a_type):
+def get_sport_info(a_type, name=""):
+    """Ritorna info sport. Se type=Ride ma nome contiene MTB/mountain/gravel, usa MountainBikeRide."""
+    if a_type == "Ride" and name:
+        _name_lower = name.lower()
+        if any(k in _name_lower for k in ["mtb","mountain","gravel","sterrato","trail","enduro","xc "]):
+            a_type = "MountainBikeRide"
     return _ALL_SPORT_INFO.get(a_type, {"icon": "🏅", "label": a_type, "color": "#9E9E9E"})
 
 # ============================================================
@@ -326,53 +336,12 @@ def open_activity_button(row, key_suffix=""):
         st.rerun()
 
 
-
-def fetch_activity_streams(activity_id, access_token, stream_types=("heartrate","watts")):
-    """Recupera gli streams Strava (dati al secondo) per una singola attività."""
-    if not activity_id or not access_token:
-        return {}
-    try:
-        keys = ",".join(stream_types)
-        url  = f"https://www.strava.com/api/v3/activities/{activity_id}/streams"
-        resp = requests.get(url, headers={"Authorization": f"Bearer {access_token}"},
-                            params={"keys": keys, "key_by_type": "true"}, timeout=8)
-        if resp.status_code != 200:
-            return {}
-        data = resp.json()
-        return {k: v.get("data", []) for k, v in data.items()}
-    except Exception:
-        return {}
-
-
-def calc_zone_times_from_streams(streams, fc_max, ftp, moving_time):
-    """Calcola secondi in ogni zona FC e Potenza dagli streams."""
-    hr_zones_def  = [0.00, 0.60, 0.70, 0.80, 0.90, 1.00]
-    pwr_zones_def = [0.00, 0.55, 0.75, 0.90, 1.05, 1.20, 1.50, 9.99]
-    hr_secs  = [0] * 5
-    pwr_secs = [0] * 7
-    for hr in streams.get("heartrate", []):
-        if hr and fc_max > 0:
-            pct = hr / fc_max
-            for zi in range(4, -1, -1):
-                if pct >= hr_zones_def[zi]:
-                    hr_secs[zi] += 1
-                    break
-    for w in streams.get("watts", []):
-        if w and ftp > 0:
-            pct = w / ftp
-            for zi in range(6, -1, -1):
-                if pct >= pwr_zones_def[zi]:
-                    pwr_secs[zi] += 1
-                    break
-    return hr_secs, pwr_secs
-
 def render_activity_detail(row, u, MAPBOX_TOKEN, draw_map, build_inline_map3d,
                             mapbox_render_allowed, mapbox_register_load, ai_generate,
-                            current_ctl, current_atl, current_tsb, status_label,
-                            access_token=None, df=None):
+                            current_ctl, current_atl, current_tsb, status_label):
     """Pagina dettaglio completa per una singola attività."""
     import streamlit.components.v1 as _components
-    s   = get_sport_info(row["type"])
+    s   = get_sport_info(row["type"], row.get("name",""))
     m   = format_metrics(row)
     z_n, z_c, z_l = get_zone_for_activity(row, u["fc_max"])
     ftp = u.get("ftp", 200)
@@ -439,98 +408,53 @@ def render_activity_detail(row, u, MAPBOX_TOKEN, draw_map, build_inline_map3d,
 
     st.divider()
 
-    # ── Streams API per tempo in zona ─────────────────────────────────
+    # Zone FC
     hr_avg    = row.get("average_heartrate")
     hr_max_a  = row.get("max_heartrate")
     fc_max    = u["fc_max"]
-    watts_avg = row.get("average_watts")
-    _act_id_s    = str(row.get("id", ""))
-    _streams_key = f"streams_{_act_id_s}"
-    if _act_id_s and _streams_key not in st.session_state:
-        if access_token:
-            with st.spinner("⏳ Carico dati zone (Streams API)..."):
-                st.session_state[_streams_key] = fetch_activity_streams(_act_id_s, access_token)
-        else:
-            st.session_state[_streams_key] = {}
-    _streams     = st.session_state.get(_streams_key, {})
-    _hr_secs, _pwr_secs = calc_zone_times_from_streams(_streams, fc_max, ftp, row.get("moving_time", 1))
-    _total_hr_s  = max(sum(_hr_secs), 1)
-    _total_pwr_s = max(sum(_pwr_secs), 1)
-    _has_streams = bool(_streams)
-
-    def _fmt_z(secs):
-        h, r = divmod(int(secs), 3600); m, s = divmod(r, 60)
-        return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
-
-    def _zone_row(label, color, rng, secs, total):
-        bar = min(100, secs / total * 100) if total else 0
-        t   = _fmt_z(secs) if secs else "—"
-        pct = f"{bar:.0f}%"
-        return (
-            f'<div style="display:flex;align-items:center;gap:8px;padding:5px 8px;border-radius:7px;margin:2px 0">'
-            f'<div style="min-width:130px;font-size:12px"><span style="color:{color};font-weight:700">{label}</span>'
-            f' <span style="font-size:10px;color:#888">{rng}</span></div>'
-            f'<div style="flex:1;height:8px;background:#ebebeb;border-radius:4px;overflow:hidden">'
-            f'<div style="width:{bar:.0f}%;height:100%;background:{color};border-radius:4px"></div></div>'
-            f'<div style="min-width:48px;text-align:right;font-size:12px;font-weight:600;color:#222">{t}</div>'
-            f'<div style="min-width:34px;text-align:right;font-size:11px;color:#999">{pct}</div>'
-            f'</div>'
-        )
-
-    # ── Zone FC ────────────────────────────────────────────────────────
-    st.markdown("### ❤️ Tempo in Zone Frequenza Cardiaca")
-    if not _has_streams:
-        st.caption("💡 Streams non disponibili — zona stimata da FC media")
-    _hr_zone_defs = [
-        ("Z1 Recupero","#9E9E9E",0.00,0.60),
-        ("Z2 Base",    "#4CAF50",0.60,0.70),
-        ("Z3 Aerobico","#FFC107",0.70,0.80),
-        ("Z4 Soglia",  "#FF9800",0.80,0.90),
-        ("Z5 Massima", "#F44336",0.90,1.00),
-    ]
-    _hz_html = '<div style="background:#fafafa;border:1px solid #eee;border-radius:12px;padding:8px 12px">'
-    for _zi, (_zl, _zc, _zlo, _zhi) in enumerate(_hr_zone_defs):
-        _blo = int(fc_max * _zlo)
-        _bhi = int(fc_max * _zhi) if _zhi < 1.0 else fc_max
-        if _has_streams:
-            _secs = _hr_secs[_zi] if _zi < len(_hr_secs) else 0
-        else:
-            _is_cur = bool(pd.notna(hr_avg) and fc_max > 0 and _zlo <= hr_avg/fc_max < _zhi)
-            _secs = int(row.get("moving_time", 0)) if _is_cur else 0
-        _hz_html += _zone_row(_zl, _zc, f"{_blo}–{_bhi} bpm", _secs, _total_hr_s)
-    _hz_html += '</div>'
-    st.markdown(_hz_html, unsafe_allow_html=True)
+    st.markdown("### ❤️ Zone Frequenza Cardiaca")
+    _hr_zones = [(1,"#4CAF50","Z1 Recupero",0.00,0.60),(2,"#8BC34A","Z2 Base",0.60,0.70),
+                 (3,"#FFC107","Z3 Aerobico",0.70,0.80),(4,"#FF9800","Z4 Soglia",0.80,0.90),
+                 (5,"#F44336","Z5 VO2max",0.90,1.00)]
+    _hz = st.columns(5)
+    for _zi, (_zn,_zc,_zl,_zlo,_zhi) in enumerate(_hr_zones):
+        _blo, _bhi = int(fc_max*_zlo), int(fc_max*_zhi)
+        _cur = pd.notna(hr_avg) and fc_max>0 and _zlo <= hr_avg/fc_max < _zhi
+        _hz[_zi].markdown(f"""<div style="background:{_zc}{'20' if _cur else '08'};
+            border:{'3' if _cur else '1'}px solid {_zc}{'ff' if _cur else '44'};
+            border-radius:10px;padding:10px;text-align:center">
+            <div style="font-size:11px;font-weight:700;color:{_zc}">{_zl}</div>
+            <div style="font-size:12px;color:#555">{_blo}–{_bhi} bpm</div>
+            {"<div style='font-size:12px;font-weight:900;color:" + _zc + "'>← attività<br>" + f"{hr_avg/fc_max*100:.0f}% FCmax</div>" if _cur else ""}
+            </div>""", unsafe_allow_html=True)
     if pd.notna(hr_avg) and fc_max > 0:
-        st.caption(f"FC media: **{hr_avg:.0f} bpm** ({hr_avg/fc_max*100:.0f}% FCmax) → **{z_l}**"
-                   + (f" | FC max: **{hr_max_a:.0f} bpm**" if pd.notna(hr_max_a) else ""))
+        st.caption(f"FC media: {hr_avg:.0f} bpm ({hr_avg/fc_max*100:.0f}% FCmax) → **{z_l}**" +
+                   (f" | FC max attività: {hr_max_a:.0f} bpm ({hr_max_a/fc_max*100:.0f}% FCmax)" if pd.notna(hr_max_a) else ""))
 
-    # ── Zone Potenza ───────────────────────────────────────────────────
+    # Zone Potenza (solo bici)
+    watts_avg = row.get("average_watts")
     if is_bike and pd.notna(watts_avg) and watts_avg and watts_avg > 0 and ftp > 0:
         st.divider()
-        st.markdown(f"### ⚡ Tempo in Zone Potenza  *(FTP: {ftp} W)*")
+        st.markdown(f"### ⚡ Zone di Potenza  *(FTP: {ftp} W)*")
         if is_estimated:
             st.caption("⚠️ Watt stimati da Strava — valori indicativi")
-        _pwr_zone_defs = [
-            ("Z1 Recupero",   "#9E9E9E",0.00,0.55),
-            ("Z2 Resistenza", "#4CAF50",0.55,0.75),
-            ("Z3 Tempo",      "#8BC34A",0.75,0.90),
-            ("Z4 Soglia",     "#FFC107",0.90,1.05),
-            ("Z5 VO2max",     "#FF9800",1.05,1.20),
-            ("Z6 Anaerobico", "#FF5722",1.20,1.50),
-            ("Z7 Neuromusc.", "#F44336",1.50,9.99),
-        ]
-        _wpct    = watts_avg / ftp
-        _pz_html = '<div style="background:#fafafa;border:1px solid #eee;border-radius:12px;padding:8px 12px">'
-        for _zi, (_zl_p, _zc, _zlo, _zhi) in enumerate(_pwr_zone_defs):
-            _wlo = int(ftp * _zlo)
+        _pwr_zones = [(1,"#9E9E9E","Z1 Recupero",0.00,0.55),(2,"#4CAF50","Z2 Resistenza",0.55,0.75),
+                      (3,"#8BC34A","Z3 Tempo",0.75,0.90),(4,"#FFC107","Z4 Soglia",0.90,1.05),
+                      (5,"#FF9800","Z5 VO2max",1.05,1.20),(6,"#FF5722","Z6 Anaerobico",1.20,1.50),
+                      (7,"#F44336","Z7 Neuromuscolare",1.50,9.99)]
+        _pz = st.columns(7)
+        _wpct = watts_avg / ftp
+        for _zi, (_zn,_zc,_zl_p,_zlo,_zhi) in enumerate(_pwr_zones):
+            _wlo = int(ftp*_zlo)
             _whi = f"{int(ftp*_zhi)}" if _zhi < 9 else "+"
-            if _has_streams:
-                _secs = _pwr_secs[_zi] if _zi < len(_pwr_secs) else 0
-            else:
-                _secs = int(row.get("moving_time", 0)) if (_zlo <= _wpct < _zhi) else 0
-            _pz_html += _zone_row(_zl_p, _zc, f"{_wlo}–{_whi} W", _secs, _total_pwr_s)
-        _pz_html += '</div>'
-        st.markdown(_pz_html, unsafe_allow_html=True)
+            _cur = _zlo <= _wpct < _zhi
+            _pz[_zi].markdown(f"""<div style="background:{_zc}{'20' if _cur else '08'};
+                border:{'3' if _cur else '1'}px solid {_zc}{'ff' if _cur else '44'};
+                border-radius:10px;padding:8px;text-align:center">
+                <div style="font-size:12px;font-weight:700;color:{_zc}">{_zl_p}</div>
+                <div style="font-size:11px;color:#555">{_wlo}–{_whi} W</div>
+                {"<div style='font-size:12px;font-weight:900;color:" + _zc + "'>← attività</div>" if _cur else ""}
+                </div>""", unsafe_allow_html=True)
         _if_val = watts_avg / ftp
         _tss_p  = (row["moving_time"] * watts_avg * _if_val) / (ftp * 3600) * 100
         _pc1, _pc2, _pc3 = st.columns(3)
@@ -545,7 +469,11 @@ def render_activity_detail(row, u, MAPBOX_TOKEN, draw_map, build_inline_map3d,
     _aid = str(row.get("id", str(row["start_date"])))
     _ck  = f"ai_analysis_{_aid}"
     if _ck in st.session_state:
-        st.info(st.session_state[_ck])
+        st.markdown(
+            f'<div style="background:#f8f9fa;border:1px solid #dee2e6;border-left:4px solid {s["color"]};'
+            f'border-radius:8px;padding:16px 20px;color:#212529;font-size:14px;line-height:1.7">'
+            f'{st.session_state[_ck]}</div>',
+            unsafe_allow_html=True)
     else:
         if st.button("🤖 Genera analisi AI", key="det_ai_btn"):
             with st.spinner("Analisi in corso..."):
@@ -559,7 +487,11 @@ def render_activity_detail(row, u, MAPBOX_TOKEN, draw_map, build_inline_map3d,
                         "Commenta questa sessione in 3-4 paragrafi: qualità allenamento, zone di lavoro, "
                         "impatto sul carico, suggerimento concreto per la prossima sessione.")
                     st.session_state[_ck] = _res
-                    st.info(_res)
+                    st.markdown(
+                        f'<div style="background:#f8f9fa;border:1px solid #dee2e6;border-left:4px solid {s["color"]};'
+                        f'border-radius:8px;padding:16px 20px;color:#212529;font-size:14px;line-height:1.7">'
+                        f'{_res}</div>',
+                        unsafe_allow_html=True)
                 except Exception as e:
                     st.error(f"Errore AI: {e}")
 
@@ -1282,13 +1214,13 @@ def build_map3d_html(encoded_polyline, mapbox_token, sport_type="", elev_gain=0,
     <div style="display:flex;align-items:center;gap:7px"><div style="width:11px;height:11px;border-radius:50%;background:#FFEB3B;flex-shrink:0"></div>25-30° attenzione</div>
     <div style="display:flex;align-items:center;gap:7px"><div style="width:11px;height:11px;border-radius:50%;background:#FF9800;flex-shrink:0"></div>30-35° rischio</div>
     <div style="display:flex;align-items:center;gap:7px"><div style="width:11px;height:11px;border-radius:50%;background:#F44336;flex-shrink:0"></div>&gt;35° pericolo</div>
-    <div style="color:#666;font-size:10px;margin-top:4px">Soglie AINEVA</div>
+    <div style="color:#666;font-size:12px;margin-top:4px">Soglie AINEVA</div>
   </div>""" if show_slope_map else ""
 
         rotate_hint = "" if compact else """
   <div id="rotate-hint" style="position:absolute;bottom:40px;right:10px;
        background:rgba(14,17,23,0.75);color:#aaa;padding:5px 10px;
-       border-radius:8px;font-size:10px;font-family:sans-serif;z-index:10;line-height:1.7">
+       border-radius:8px;font-size:12px;font-family:sans-serif;z-index:10;line-height:1.7">
     🖱️ <b>Drag</b> pan &nbsp;|&nbsp; <b>Ctrl+drag</b> inclina<br>
     <b>Alt+drag</b> ruota &nbsp;|&nbsp; <b>Scroll</b> zoom
   </div>"""
@@ -1333,8 +1265,6 @@ const canvas = map.getCanvas();
 canvas.addEventListener('wheel', (e) => {{
   e.stopPropagation();
 }}, {{ passive: false }});
-map.getContainer().addEventListener('mouseenter', () => {{ document.body.style.overflow = 'hidden'; }});
-map.getContainer().addEventListener('mouseleave', () => {{ document.body.style.overflow = ''; }});
 
 // ── Rotazione con tasto centrale del mouse (click rotella + trascina) ──
 (function() {{
@@ -1463,6 +1393,32 @@ def parse_ringconn_activity(file) -> pd.DataFrame:
     df_a = df_a.dropna(subset=["date"]).sort_values("date").reset_index(drop=True)
     return df_a[["date","steps","kcal_day"]]
 
+
+
+def parse_ringconn_zip(zip_file) -> tuple:
+    """
+    Parsa uno ZIP RingConn che contiene i 3 CSV.
+    Ritorna (vitals_df, sleep_df, activity_df) — None se non trovato.
+    """
+    import zipfile, io
+    vitals   = None
+    sleep    = None
+    activity = None
+    try:
+        with zipfile.ZipFile(zip_file, "r") as zf:
+            for name in zf.namelist():
+                name_l = name.lower()
+                data   = zf.read(name)
+                buf    = io.BytesIO(data)
+                if "vital" in name_l:
+                    vitals   = parse_ringconn_vitals(buf)
+                elif "sleep" in name_l:
+                    sleep    = parse_ringconn_sleep(buf)
+                elif "activity" in name_l:
+                    activity = parse_ringconn_activity(buf)
+    except Exception as e:
+        raise ValueError(f"Errore lettura ZIP: {e}")
+    return vitals, sleep, activity
 
 def calc_readiness(vitals_row, sleep_row, tsb: float) -> dict:
     scores = {}
@@ -2231,29 +2187,47 @@ if token_ok:
         rc_has_data = st.session_state.rc_vitals is not None
         if rc_has_data:
             st.success(f"✅ {len(st.session_state.rc_vitals)} giorni caricati")
-        with st.expander("📂 Carica CSV" if not rc_has_data else "🔄 Aggiorna CSV"):
+        with st.expander("📂 Carica dati" if not rc_has_data else "🔄 Aggiorna dati"):
             st.caption("Esporta dall'app RingConn: Profilo → Impostazioni → Data Export")
-            f_vitals   = st.file_uploader("Vital_Signs CSV",  type="csv", key="up_vitals")
-            f_sleep    = st.file_uploader("Sleep CSV",          type="csv", key="up_sleep")
-            f_activity = st.file_uploader("Activity CSV (passi)", type="csv", key="up_activity")
-            if f_vitals:
+            # ── Modalità ZIP (preferita) ──
+            f_zip = st.file_uploader("📦 ZIP RingConn (tutti e 3 i file)", type="zip", key="up_zip")
+            if f_zip:
                 try:
-                    st.session_state.rc_vitals = parse_ringconn_vitals(f_vitals)
-                    st.success(f"✅ Vital Signs: {len(st.session_state.rc_vitals)} giorni")
+                    _v, _s, _a = parse_ringconn_zip(f_zip)
+                    if _v is not None:
+                        st.session_state.rc_vitals   = _v
+                    if _s is not None:
+                        st.session_state.rc_sleep    = _s
+                    if _a is not None:
+                        st.session_state.rc_activity = _a
+                    _loaded = [k for k,v in [("Vital Signs",_v),("Sleep",_s),("Activity",_a)] if v is not None]
+                    st.success(f"✅ Caricati: {', '.join(_loaded)}")
+                    st.rerun()
                 except Exception as e:
-                    st.error(f"Errore: {e}")
-            if f_sleep:
-                try:
-                    st.session_state.rc_sleep = parse_ringconn_sleep(f_sleep)
-                    st.success(f"✅ Sleep: {len(st.session_state.rc_sleep)} sessioni")
-                except Exception as e:
-                    st.error(f"Errore: {e}")
-            if f_activity:
-                try:
-                    st.session_state.rc_activity = parse_ringconn_activity(f_activity)
-                    st.success(f"✅ Activity: {len(st.session_state.rc_activity)} giorni")
-                except Exception as e:
-                    st.error(f"Errore: {e}")
+                    st.error(f"Errore ZIP: {e}")
+            # ── Modalità CSV singoli (fallback) ──
+            with st.expander("📄 Oppure carica CSV singoli"):
+                f_vitals   = st.file_uploader("Vital_Signs CSV",  type="csv", key="up_vitals")
+                f_sleep    = st.file_uploader("Sleep CSV",         type="csv", key="up_sleep")
+                f_activity = st.file_uploader("Activity CSV",      type="csv", key="up_activity")
+                if f_vitals:
+                    try:
+                        st.session_state.rc_vitals = parse_ringconn_vitals(f_vitals)
+                        st.success(f"✅ Vital Signs: {len(st.session_state.rc_vitals)} giorni")
+                    except Exception as e:
+                        st.error(f"Errore: {e}")
+                if f_sleep:
+                    try:
+                        st.session_state.rc_sleep = parse_ringconn_sleep(f_sleep)
+                        st.success(f"✅ Sleep: {len(st.session_state.rc_sleep)} sessioni")
+                    except Exception as e:
+                        st.error(f"Errore: {e}")
+                if f_activity:
+                    try:
+                        st.session_state.rc_activity = parse_ringconn_activity(f_activity)
+                        st.success(f"✅ Activity: {len(st.session_state.rc_activity)} giorni")
+                    except Exception as e:
+                        st.error(f"Errore: {e}")
             if any(st.session_state.get(k) is not None for k in ["rc_vitals","rc_sleep","rc_activity"]):
                 if st.button("🗑️ Rimuovi dati RingConn", use_container_width=True):
                     st.session_state.rc_vitals   = None
@@ -2294,37 +2268,28 @@ if token_ok:
     # ============================================================
     # DASHBOARD
     # ============================================================
-    # ── DETTAGLIO ATTIVITÀ — rispetta menu, chiude se si cambia sezione ──
-    _detail_menu_key = "detail_opened_from_menu"
+    # ── DETTAGLIO ATTIVITÀ — intercetta qualunque sezione ──────
     if st.session_state.get("selected_activity_id") is not None:
-        _prev_menu = st.session_state.get(_detail_menu_key)
-        if _prev_menu is not None and _prev_menu != menu:
-            st.session_state.selected_activity_id = None
-            st.session_state.pop(_detail_menu_key, None)
-        else:
-            st.session_state[_detail_menu_key] = menu
-            _sel_id  = st.session_state.selected_activity_id
-            _sel_row = df[df["id"] == _sel_id] if "id" in df.columns else pd.DataFrame()
-            if _sel_row.empty:
-                try:
-                    _sel_row = df.iloc[[int(_sel_id)]]
-                except Exception:
-                    pass
-            if not _sel_row.empty:
-                render_activity_detail(
-                    row=_sel_row.iloc[0], u=u,
-                    MAPBOX_TOKEN=MAPBOX_TOKEN,
-                    draw_map=draw_map,
-                    build_inline_map3d=build_inline_map3d,
-                    mapbox_render_allowed=mapbox_render_allowed,
-                    mapbox_register_load=mapbox_register_load,
-                    ai_generate=ai_generate,
-                    current_ctl=current_ctl, current_atl=current_atl,
-                    current_tsb=current_tsb, status_label=status_label,
-                    access_token=st.session_state.strava_token_info.get("access_token"),
-                    df=df,
-                )
-                st.stop()
+        _sel_id = st.session_state.selected_activity_id
+        _sel_row = df[df["id"] == _sel_id] if "id" in df.columns else pd.DataFrame()
+        if _sel_row.empty:
+            try:
+                _sel_row = df.iloc[[int(_sel_id)]]
+            except Exception:
+                pass
+        if not _sel_row.empty:
+            render_activity_detail(
+                row=_sel_row.iloc[0], u=u,
+                MAPBOX_TOKEN=MAPBOX_TOKEN,
+                draw_map=draw_map,
+                build_inline_map3d=build_inline_map3d,
+                mapbox_render_allowed=mapbox_render_allowed,
+                mapbox_register_load=mapbox_register_load,
+                ai_generate=ai_generate,
+                current_ctl=current_ctl, current_atl=current_atl,
+                current_tsb=current_tsb, status_label=status_label,
+            )
+            st.stop()
 
     if menu == "📊 Dashboard":
         st.markdown("## 📊 Performance Hub")
@@ -2464,7 +2429,7 @@ if token_ok:
                         display:flex;align-items:center;gap:16px">
                 <div style="text-align:center;min-width:55px">
                     <div style="font-size:26px;font-weight:900;color:{b['color']}">{b['budget']}</div>
-                    <div style="font-size:10px;color:#888">TSS budget</div>
+                    <div style="font-size:12px;color:#888">TSS budget</div>
                 </div>
                 <div style="flex:1">
                     <div style="font-size:13px;font-weight:700;color:{b['color']}">{b['zone']}</div>
@@ -2527,19 +2492,19 @@ if token_ok:
                         <div style="display:flex;gap:16px;flex-wrap:wrap">
                             <div style="text-align:center">
                                 <div style="font-size:16px;font-weight:700;color:#111">{km:.1f}</div>
-                                <div style="font-size:10px;color:#555">km</div>
+                                <div style="font-size:12px;color:#555">km</div>
                             </div>
                             <div style="text-align:center">
                                 <div style="font-size:16px;font-weight:700;color:#111">{int(ore)}h {int((ore%1)*60)}m</div>
-                                <div style="font-size:10px;color:#555">durata</div>
+                                <div style="font-size:12px;color:#555">durata</div>
                             </div>
                             <div style="text-align:center">
                                 <div style="font-size:16px;font-weight:700;color:#111">{tss_sp:.0f}</div>
-                                <div style="font-size:10px;color:#555">TSS</div>
+                                <div style="font-size:12px;color:#555">TSS</div>
                             </div>
                             <div style="text-align:center">
                                 <div style="font-size:16px;font-weight:700;color:#111">{elev_sp:.0f}</div>
-                                <div style="font-size:10px;color:#555">↑ m</div>
+                                <div style="font-size:12px;color:#555">↑ m</div>
                             </div>
                         </div>
                         <div>{dkm_str}</div>
@@ -2591,109 +2556,87 @@ if token_ok:
         last3 = df.iloc[-3:][::-1]
 
         for idx, (_, row) in enumerate(last3.iterrows()):
-            s   = get_sport_info(row["type"])
+            s   = get_sport_info(row["type"], row.get("name",""))
             m   = format_metrics(row)
             z_n, z_c, z_l = get_zone_for_activity(row, u["fc_max"])
-            _is_bike = row["type"] in ("Ride","VirtualRide","MountainBikeRide")
-            _pace_label = "Velocità" if _is_bike else "Passo"
 
             with st.container():
                 _cc, _cb = st.columns([11, 1])
                 with _cc:
                     st.markdown(f"""
-                    <div style="background:#ffffff;border:1px solid {s['color']}55;
-                                border-left:4px solid {s['color']};border-radius:12px;
-                                padding:14px 18px;margin:6px 0;box-shadow:0 1px 4px rgba(0,0,0,0.06)">
-                        <div style="display:flex;align-items:center;justify-content:space-between;
-                                    margin-bottom:10px;flex-wrap:wrap;gap:6px">
-                            <div style="display:flex;align-items:center;gap:8px">
-                                <span style="font-size:22px">{s['icon']}</span>
-                                <div>
-                                    <div style="font-size:15px;font-weight:700;color:#111">{row['name']}</div>
-                                    <div style="font-size:11px;color:#666">{row['start_date'].strftime('%d %b %Y · %H:%M')} — {s['label']}</div>
-                                </div>
-                            </div>
-                            <span style="background:{z_c}18;color:{z_c};border:1px solid {z_c}44;
-                                         border-radius:6px;padding:2px 8px;font-size:11px;font-weight:700">{z_l}</span>
+                    <div class="activity-card" style="border-color: {s['color']}40;">
+                        <div class="activity-header" style="color:{s['color']}">
+                            {s['icon']} {row['name']}
+                            <span style="font-size:12px; color:#888; font-weight:400; margin-left:8px">
+                                {row['start_date'].strftime('%d %b %Y · %H:%M')}
+                            </span>
+                            <span class="zone-badge" style="background:{z_c}22; color:{z_c}; border:1px solid {z_c}44; float:right; font-size:12px">
+                                {z_l}
+                            </span>
                         </div>
-                        <div style="display:flex;flex-wrap:wrap;gap:8px">
-                            <div style="background:#f5f5f5;border-radius:8px;padding:6px 12px;text-align:center;min-width:60px">
-                                <div style="font-size:14px;font-weight:700;color:#111">{m['dist_str']}</div>
-                                <div style="font-size:10px;color:#666">distanza</div>
-                            </div>
-                            <div style="background:#f5f5f5;border-radius:8px;padding:6px 12px;text-align:center;min-width:60px">
-                                <div style="font-size:14px;font-weight:700;color:#111">{m['dur_str']}</div>
-                                <div style="font-size:10px;color:#666">durata</div>
-                            </div>
-                            <div style="background:#f5f5f5;border-radius:8px;padding:6px 12px;text-align:center;min-width:60px">
-                                <div style="font-size:14px;font-weight:700;color:#111">{m['pace_str']}</div>
-                                <div style="font-size:10px;color:#666">{_pace_label}</div>
-                            </div>
-                            <div style="background:#f5f5f5;border-radius:8px;padding:6px 12px;text-align:center;min-width:60px">
-                                <div style="font-size:14px;font-weight:700;color:#111">{m['elev']}</div>
-                                <div style="font-size:10px;color:#666">dislivello</div>
-                            </div>
-                            <div style="background:#f5f5f5;border-radius:8px;padding:6px 12px;text-align:center;min-width:60px">
-                                <div style="font-size:14px;font-weight:700;color:#111">{m['hr_avg']}</div>
-                                <div style="font-size:10px;color:#666">FC media</div>
-                            </div>
-                            <div style="background:#f5f5f5;border-radius:8px;padding:6px 12px;text-align:center;min-width:60px">
-                                <div style="font-size:14px;font-weight:700;color:#111">{m['watts']}</div>
-                                <div style="font-size:10px;color:#666">watt avg</div>
-                            </div>
-                            <div style="background:{s['color']}15;border-radius:8px;padding:6px 12px;text-align:center;min-width:60px;border:1px solid {s['color']}33">
-                                <div style="font-size:14px;font-weight:700;color:{s['color']}">{row['tss']:.0f}</div>
-                                <div style="font-size:10px;color:#666">TSS</div>
-                            </div>
-                            <div style="background:#f5f5f5;border-radius:8px;padding:6px 12px;text-align:center;min-width:60px">
-                                <div style="font-size:14px;font-weight:700;color:#111">{m['calories']}</div>
-                                <div style="font-size:10px;color:#666">kcal</div>
-                            </div>
+                        <div class="metric-row">
+                            <div class="metric-pill">📏 Distanza <span>{m['dist_str']}</span></div>
+                            <div class="metric-pill">⏱️ Durata <span>{m['dur_str']}</span></div>
+                            <div class="metric-pill">⚡ {('Passo' if row['type'] not in ('Ride','VirtualRide','MountainBikeRide') else 'Velocità')} <span>{m['pace_str']}</span></div>
+                            <div class="metric-pill">⛰️ Dislivello <span>{m['elev']}</span></div>
+                            <div class="metric-pill">❤️ FC Media <span>{m['hr_avg']}</span></div>
+                            <div class="metric-pill">💓 FC Max <span>{m['hr_max']}</span></div>
+                            <div class="metric-pill">🔄 Cadenza <span>{m['cadence']}</span></div>
+                            <div class="metric-pill">⚡ Watt <span>{m['watts']}</span></div>
+                            <div class="metric-pill">🔥 Calorie <span>{m['calories']}</span></div>
+                            <div class="metric-pill">📊 TSS <span>{row['tss']:.1f}</span></div>
+                            <div class="metric-pill">😓 Suffer Score <span>{m['suffer']}</span></div>
                         </div>
                     </div>
                     """, unsafe_allow_html=True)
                 with _cb:
-                    st.markdown("<div style='height:18px'></div>", unsafe_allow_html=True)
+                    st.markdown("<div style='height:14px'></div>", unsafe_allow_html=True)
                     open_activity_button(row, key_suffix=f"dash_{idx}")
 
-            # Mappa SOLO per la prima attività (la più recente)
-            if idx == 0:
-                _poly = row.get("map", {})
-                _poly = _poly.get("summary_polyline") if isinstance(_poly, dict) else None
-                if _poly:
-                    _mb_ok, _ = mapbox_render_allowed()
-                    _tab2d, _tab3d = st.tabs(["🗺️ Mappa 2D", "🏔️ Mappa 3D"])
-                    with _tab2d:
-                        _mobj = draw_map(_poly)
-                        if _mobj:
-                            _mc, _minfo = st.columns([3, 1])
-                            with _mc:
-                                st_folium(_mobj, width=None, height=260, key=f"map_{idx}")
-                            with _minfo:
-                                st.markdown(f"**Sport:** {s['label']}")
-                                st.markdown(f"**Data:** {row['start_date'].strftime('%d %b')}")
-                                st.markdown(f"**Zona:** {z_l}")
-                                _pct = (row.get('average_heartrate',0) or 0) / u['fc_max'] * 100
-                                st.markdown(f"**%FC:** {_pct:.0f}%")
-                    with _tab3d:
-                        if not MAPBOX_TOKEN:
-                            st.info("Configura MAPBOX_TOKEN per la mappa 3D.")
-                        elif not _mb_ok:
-                            st.warning("Limite Mapbox raggiunto.")
-                        else:
-                            _eg = float(row.get("total_elevation_gain") or 0)
-                            _h3d = build_inline_map3d(_poly, MAPBOX_TOKEN,
-                                      sport_type=row.get("type",""), elev_gain=_eg, height=340)
-                            if _h3d:
-                                import streamlit.components.v1 as components
-                                components.html(_h3d, height=350, scrolling=False)
-                                mapbox_register_load()
+            # Mappa per tutte e 3 le attività
+            _poly = row.get("map", {})
+            _poly = _poly.get("summary_polyline") if isinstance(_poly, dict) else None
+            if _poly:
+                _mb_ok, _ = mapbox_render_allowed()
+                _tab2d, _tab3d = st.tabs(["🗺️ Mappa 2D", "🏔️ Mappa 3D"])
+                with _tab2d:
+                    _mobj = draw_map(_poly)
+                    if _mobj:
+                        _mc, _minfo = st.columns([3, 1])
+                        with _mc:
+                            st_folium(_mobj, width=None, height=260, key=f"map_{idx}")
+                        with _minfo:
+                            st.markdown(f"**Sport:** {s['label']}")
+                            st.markdown(f"**Data:** {row['start_date'].strftime('%d %b')}")
+                            st.markdown(f"**Zona:** {z_l}")
+                            _pct = (row.get('average_heartrate',0) or 0) / u['fc_max'] * 100
+                            st.markdown(f"**%FC:** {_pct:.0f}%")
+                with _tab3d:
+                    if not MAPBOX_TOKEN:
+                        st.info("Configura MAPBOX_TOKEN per la mappa 3D.")
+                    elif not _mb_ok:
+                        st.warning("Limite Mapbox raggiunto.")
+                    else:
+                        _eg = float(row.get("total_elevation_gain") or 0)
+                        _h3d = build_inline_map3d(_poly, MAPBOX_TOKEN,
+                                  sport_type=row.get("type",""), elev_gain=_eg, height=340)
+                        if _h3d:
+                            import streamlit.components.v1 as components
+                            components.html(_h3d, height=350, scrolling=False)
+                            mapbox_register_load()
 
+            # --- AI Analisi: solo per la prima attività (la più recente) ---
+            if idx == 0:
                 with st.expander("🤖 Analisi Coach", expanded=True):
-                    _act_id   = str(row.get("id", row["start_date"]))
+                    # Cache in session_state — non ricalcolare se stessa attività
+                    _act_id = str(row.get("id", row["start_date"]))
                     _cache_key = f"ai_analysis_{_act_id}"
                     if _cache_key in st.session_state:
-                        st.info(st.session_state[_cache_key])
+                        st.markdown(
+                            f'<div style="background:#f8f9fa;border:1px solid #dee2e6;border-left:4px solid {s["color"]};'
+                            f'border-radius:8px;padding:14px 18px;color:#212529;font-size:14px;line-height:1.7">'
+                            f'{st.session_state[_cache_key]}</div>',
+                            unsafe_allow_html=True)
                     else:
                         with st.spinner("Il coach sta analizzando..."):
                             try:
@@ -2714,7 +2657,11 @@ if token_ok:
                                 )
                                 _result = ai_generate(f"{_ctx}\n\n{_prompt}")
                                 st.session_state[_cache_key] = _result
-                                st.info(_result)
+                                st.markdown(
+                                    f'<div style="background:#f8f9fa;border:1px solid #dee2e6;border-left:4px solid {s["color"]};'
+                                    f'border-radius:8px;padding:14px 18px;color:#212529;font-size:14px;line-height:1.7">'
+                                    f'{_result}</div>',
+                                    unsafe_allow_html=True)
                             except Exception as e:
                                 st.error(f"Errore AI: {e}")
 
@@ -2759,7 +2706,7 @@ if token_ok:
         rc_s = st.session_state.rc_sleep
 
         if rc_v is None and rc_s is None:
-            st.info("Nessun dato RingConn caricato. Usa il pannello **💍 RingConn** nella sidebar per caricare i tuoi CSV.")
+            st.info("Nessun dato RingConn caricato. Usa il pannello **💍 RingConn** nella sidebar — puoi caricare direttamente lo **ZIP** esportato dall'app.")
             st.markdown("""
             **Come esportare i dati da RingConn:**
             1. Apri l'app RingConn sul telefono
@@ -3671,7 +3618,11 @@ Rispondi in italiano, tono professionale ma diretto, massimo 300 parole."""
                     except Exception as e:
                         st.error(f"Errore AI: {e}")
             if "analisi_fisica" in st.session_state:
-                st.info(st.session_state["analisi_fisica"])
+                st.markdown(
+                    f'<div style="background:#f8f9fa;border:1px solid #dee2e6;border-left:4px solid #2196F3;'
+                    f'border-radius:8px;padding:16px 20px;color:#212529;font-size:14px;line-height:1.7">'
+                    f'{st.session_state["analisi_fisica"]}</div>',
+                    unsafe_allow_html=True)
 
         with col_ai2:
             st.markdown("#### 🗓️ Piano Allenamento — Prossimi 7 giorni")
@@ -3704,7 +3655,11 @@ Rispondi in italiano, tono professionale ma diretto, massimo 300 parole."""
                     except Exception as e:
                         st.error(f"Errore AI: {e}")
             if "piano_7gg" in st.session_state:
-                st.success(st.session_state["piano_7gg"])
+                st.markdown(
+                    f'<div style="background:#f0fff4;border:1px solid #b2dfdb;border-left:4px solid #4CAF50;'
+                    f'border-radius:8px;padding:16px 20px;color:#1b5e20;font-size:14px;line-height:1.7">'
+                    f'{st.session_state["piano_7gg"]}</div>',
+                    unsafe_allow_html=True)
 
     # ============================================================
     # RECAP
@@ -4170,7 +4125,7 @@ Rispondi in italiano, tono professionale ma diretto, massimo 300 parole."""
                 # Selettore attività
                 act_options = {}
                 for _, row in df_map_filtered.sort_values("start_date", ascending=False).head(100).iterrows():
-                    si = get_sport_info(row["type"])
+                    si = get_sport_info(row["type"], row.get("name",""))
                     label = f"{si['icon']} {row['start_date'].strftime('%d/%m/%Y')} — {row.get('name','N/A')} ({row['distance']/1000:.1f} km)"
                     act_options[label] = row
 
@@ -4273,7 +4228,7 @@ Rispondi in italiano, tono professionale ma diretto, massimo 300 parole."""
             else:
                 act_list = []
                 for _, row in df_map_filtered.sort_values("start_date", ascending=False).head(50).iterrows():
-                    si = get_sport_info(row["type"])
+                    si = get_sport_info(row["type"], row.get("name",""))
                     label = f"{si['icon']} {row['start_date'].strftime('%d/%m/%Y')} — {row.get('name','N/A')} ({row['distance']/1000:.1f} km)"
                     act_list.append((label, row))
 
@@ -4311,7 +4266,7 @@ Rispondi in italiano, tono professionale ma diretto, massimo 300 parole."""
                                                 "geometry": {"type": "LineString", "coordinates": coords_c}})
                         start_c = _json2.dumps(coords_c[0])
                         end_c   = _json2.dumps(coords_c[-1])
-                        si_c    = get_sport_info(row["type"])
+                        si_c    = get_sport_info(row["type"], row.get("name",""))
                         name_c  = row.get("name", "Attività")[:20]
                         dist_c  = row["distance"] / 1000
 
@@ -4354,7 +4309,7 @@ Rispondi in italiano, tono professionale ma diretto, massimo 300 parole."""
                         # Legenda tracciati
                         legend_html = ""
                         for idx, row in enumerate(selected_rows):
-                            si_l = get_sport_info(row["type"])
+                            si_l = get_sport_info(row["type"], row.get("name",""))
                             legend_html += f"<div class='legend-row'><div class='legend-dot' style='background:{palette[idx]}'></div>{si_l['icon']} {row.get('name','')[:20]} ({row['distance']/1000:.1f}km)</div>"
 
                         html_compare = f"""<!DOCTYPE html>
@@ -4393,8 +4348,6 @@ map.scrollZoom.setWheelZoomRate(1/450);
 (function() {{
   const cv = map.getCanvas();
   cv.addEventListener('wheel', (e) => {{ e.stopPropagation(); }}, {{ passive: false }});
-  map.getContainer().addEventListener('mouseenter', () => {{ document.body.style.overflow = 'hidden'; }});
-  map.getContainer().addEventListener('mouseleave', () => {{ document.body.style.overflow = ''; }});
   let mid = false, lx = 0, ly = 0;
   cv.addEventListener('mousedown', (e) => {{
     if (e.button === 1) {{ e.preventDefault(); mid = true; lx = e.clientX; ly = e.clientY; cv.style.cursor = 'grab'; }}
@@ -4454,7 +4407,7 @@ map.on('load', () => {{
 
             act_ski_opts = {}
             for _, row in df_ski_use.sort_values("start_date", ascending=False).head(50).iterrows():
-                si = get_sport_info(row["type"])
+                si = get_sport_info(row["type"], row.get("name",""))
                 label = f"{si['icon']} {row['start_date'].strftime('%d/%m/%Y')} — {row.get('name','N/A')} ({row['distance']/1000:.1f} km)"
                 act_ski_opts[label] = row
 
@@ -4565,7 +4518,7 @@ map.on('load', () => {{
   <div class="legend-av">
     <b>Layers attivi</b>
     {aineva_row}{snow_row}{slope_rows}
-    <div style="margin-top:6px;color:#666;font-size:10px">Pendenza = stima GPS</div>
+    <div style="margin-top:6px;color:#666;font-size:12px">Pendenza = stima GPS</div>
   </div>
   <div id="info-ski">
     <div style="font-weight:700;margin-bottom:4px">{ski_icon} {ski_name}</div>
@@ -4588,8 +4541,6 @@ map.scrollZoom.setWheelZoomRate(1/450);
 (function() {{
   const cv = map.getCanvas();
   cv.addEventListener('wheel', (e) => {{ e.stopPropagation(); }}, {{ passive: false }});
-  map.getContainer().addEventListener('mouseenter', () => {{ document.body.style.overflow = 'hidden'; }});
-  map.getContainer().addEventListener('mouseleave', () => {{ document.body.style.overflow = ''; }});
   let mid = false, lx = 0, ly = 0;
   cv.addEventListener('mousedown', (e) => {{
     if (e.button === 1) {{ e.preventDefault(); mid = true; lx = e.clientX; ly = e.clientY; cv.style.cursor = 'grab'; }}
@@ -4787,8 +4738,6 @@ map.scrollZoom.setWheelZoomRate(1/450);
 (function() {{
   const cv = map.getCanvas();
   cv.addEventListener('wheel', (e) => {{ e.stopPropagation(); }}, {{ passive: false }});
-  map.getContainer().addEventListener('mouseenter', () => {{ document.body.style.overflow = 'hidden'; }});
-  map.getContainer().addEventListener('mouseleave', () => {{ document.body.style.overflow = ''; }});
   let mid = false, lx = 0, ly = 0;
   cv.addEventListener('mousedown', (e) => {{
     if (e.button === 1) {{ e.preventDefault(); mid = true; lx = e.clientX; ly = e.clientY; cv.style.cursor = 'grab'; }}
@@ -4932,7 +4881,7 @@ map.on('draw.delete', updateStats);
                                 <span style="font-size:12px;color:#111">❤️ {_sm['hr_avg']}</span>
                                 <span style="font-size:12px;color:#111">📊 {_sr['tss']:.0f} TSS</span>
                                 <span style="background:{_zc_s}22;color:{_zc_s};border:1px solid {_zc_s}55;
-                                             border-radius:4px;padding:1px 6px;font-size:10px;font-weight:700">{_zl_s}</span>
+                                             border-radius:4px;padding:1px 6px;font-size:12px;font-weight:700">{_zl_s}</span>
                             </div>
                         </div>""", unsafe_allow_html=True)
                     with _sbc:
@@ -4942,9 +4891,9 @@ map.on('draw.delete', updateStats);
                             st.rerun()
             st.divider()
 
-        # ── Filtro sport (solo primari + Altro) ──────────────────
-        _primary_in_df = [s for s in PRIMARY_SPORTS if s in df["type"].values]
-        _extra_in_df   = [s for s in df["type"].unique() if s not in PRIMARY_SPORTS]
+        # ── Filtro sport (solo sport significativi + Altro) ──────
+        _primary_in_df = [s for s in CALENDAR_FILTER_SPORTS if s in df["type"].values]
+        _extra_in_df   = [s for s in df["type"].unique() if s not in CALENDAR_FILTER_SPORTS]
         _filter_opts   = _primary_in_df + (["_altro_"] if _extra_in_df else [])
 
         if "recap_sport_filter" not in st.session_state:
@@ -5088,8 +5037,7 @@ map.on('draw.delete', updateStats);
                 _hcols = st.columns(7)
                 for _di, _dn in enumerate(_DAY_NAMES):
                     _hcols[_di].markdown(
-                        f"<div style='text-align:center;font-size:14px;color:#333;font-weight:700;"
-                        f"letter-spacing:0.04em;padding:2px 0 6px'>{_dn}</div>",
+                        f"<div style='text-align:center;font-size:11px;color:#444;font-weight:700'>{_dn}</div>",
                         unsafe_allow_html=True)
 
                 # Griglia settimane
@@ -5118,63 +5066,51 @@ map.on('draw.delete', updateStats);
 
                             _num_col = "#e94560" if _is_tod else "#111" if _in_m else "#bbb"
 
-                            # Cella giorno: icona + km + durata + TSS (stile Garmin)
+                            # Cella stile Suunto: numero grande + cerchi colorati proporzionali al TSS
                             if _has_act and _in_m:
-                                _day_tss = float(_dacts["tss"].fillna(0).sum())
-                                _day_km  = float(_dacts["distance"].fillna(0).sum()) / 1000
-                                _day_sec = float(_dacts["moving_time"].fillna(0).sum())
-                                _day_h   = int(_day_sec // 3600)
-                                _day_mn  = int((_day_sec % 3600) // 60)
-                                _dur_str = f"{_day_h}h{_day_mn:02d}" if _day_h > 0 else f"{_day_mn}m"
-                                _tss_alpha = min(0.20, _day_tss / 150 * 0.20)
+                                _day_tss   = float(_dacts["tss"].fillna(0).sum())
                                 _dom_sport = _dacts["type"].value_counts().index[0]
-                                _dom_si    = get_sport_info(_dom_sport)
-                                _r_hex = int(_dom_si["color"][1:3], 16)
-                                _g_hex = int(_dom_si["color"][3:5], 16)
-                                _b_hex = int(_dom_si["color"][5:7], 16)
-                                _heat_bg = f"rgba({_r_hex},{_g_hex},{_b_hex},{_tss_alpha:.2f})"
+                                _dom_name  = _dacts.iloc[0].get("name","")
+                                _dom_si    = get_sport_info(_dom_sport, _dom_name)
                                 if _sel:
-                                    _bg2, _brd2 = "rgba(233,69,96,0.14)", "2px solid #e94560"
+                                    _bg2, _brd2 = "rgba(233,69,96,0.10)", "2px solid #e94560"
                                 elif _is_tod:
-                                    _bg2, _brd2 = "rgba(33,150,243,0.12)", "2px solid #2196F3"
+                                    _bg2, _brd2 = "rgba(33,150,243,0.10)", "2px solid #2196F3"
                                 else:
-                                    _bg2  = _heat_bg
-                                    _brd2 = f"1px solid {_dom_si['color']}55"
-                                _rows_html = ""
-                                for _, _ar in _dacts.head(3).iterrows():
-                                    _asi2 = get_sport_info(_ar["type"])
+                                    _bg2  = "transparent"
+                                    _brd2 = "1px solid rgba(0,0,0,0.06)"
+                                _circles = ""
+                                for _, _ar in _dacts.head(4).iterrows():
+                                    _asi2 = get_sport_info(_ar["type"], _ar.get("name",""))
+                                    _tss2 = float(_ar.get("tss") or 0)
                                     _km2  = _ar["distance"] / 1000
                                     _sec2 = _ar["moving_time"]
                                     _h2   = int(_sec2 // 3600)
                                     _m2   = int((_sec2 % 3600) // 60)
                                     _d2   = f"{_h2}h{_m2:02d}" if _h2 > 0 else f"{_m2}m"
-                                    _rows_html += (
-                                        f'<div style="display:flex;align-items:center;gap:2px;margin:1px 0;'
-                                        f'justify-content:center" title="{_asi2["label"]} {_km2:.1f}km {_d2}">'
-                                        f'<span style="font-size:11px">{_asi2["icon"]}</span>'
-                                        f'<span style="font-size:8px;color:#333;font-weight:600;line-height:1">{_km2:.0f}k</span>'
-                                        f'<span style="font-size:7px;color:#666;line-height:1">{_d2}</span>'
-                                        f'</div>'
+                                    _sz2  = max(14, min(36, int(_tss2 / 5) + 14))
+                                    _circles += (
+                                        f'<div title="{_asi2["label"]} · {_km2:.1f}km · {_d2} · TSS {_tss2:.0f}" '
+                                        f'style="width:{_sz2}px;height:{_sz2}px;border-radius:50%;'
+                                        f'background:{_asi2["color"]};flex-shrink:0"></div>'
                                     )
-                                if len(_dacts) > 3:
-                                    _rows_html += f'<div style="font-size:7px;color:#888;text-align:center">+{len(_dacts)-3}</div>'
-                                _tss_color = "#d32f2f" if _day_tss >= 120 else "#e65100" if _day_tss >= 70 else "#2e7d32"
+                                if len(_dacts) > 4:
+                                    _circles += f'<div style="font-size:11px;color:#555;align-self:center">+{len(_dacts)-4}</div>'
                                 st.markdown(
-                                    f'<div style="background:{_bg2};border:{_brd2};border-radius:10px;'
-                                    f'padding:4px 3px 3px;min-height:62px;pointer-events:none;overflow:hidden">'
-                                    f'<div style="font-size:12px;font-weight:700;color:{_num_col};line-height:1;'
-                                    f'     padding:0 3px 2px">{_day.day}</div>'
-                                    f'{_rows_html}'
-                                    f'<div style="font-size:8px;font-weight:700;color:{_tss_color};'
-                                    f'     text-align:center;margin-top:1px">TSS {_day_tss:.0f}</div>'
+                                    f'<div style="background:{_bg2};border:{_brd2};border-radius:12px;'
+                                    f'padding:6px 4px 5px;min-height:76px;pointer-events:none;overflow:hidden">'
+                                    f'<div style="font-size:16px;font-weight:700;color:{_num_col};'
+                                    f'     line-height:1;padding:0 4px 5px">{_day.day}</div>'
+                                    f'<div style="display:flex;flex-wrap:wrap;gap:3px;justify-content:center;'
+                                    f'     align-items:flex-end;padding:0 2px">{_circles}</div>'
                                     f'</div>',
                                     unsafe_allow_html=True)
                             else:
                                 st.markdown(
-                                    f'<div style="background:{_bg};border:{_brd};border-radius:10px;'
-                                    f'padding:4px 3px 3px;min-height:62px;pointer-events:none">'
-                                    f'<div style="font-size:12px;font-weight:{"700" if _in_m else "400"};'
-                                    f'     color:{_num_col};line-height:1;padding:0 3px">{_day.day if _in_m else ""}</div>'
+                                    f'<div style="background:{_bg};border:{_brd};border-radius:12px;'
+                                    f'padding:6px 4px 5px;min-height:76px;pointer-events:none">'
+                                    f'<div style="font-size:16px;font-weight:{"700" if _in_m else "400"};'
+                                    f'     color:{_num_col};line-height:1;padding:0 4px">{_day.day if _in_m else ""}</div>'
                                     f'</div>',
                                     unsafe_allow_html=True)
 
@@ -5244,7 +5180,7 @@ map.on('draw.delete', updateStats);
                 _sel_acts = acts_by_day[_sel_day]
                 st.markdown(f"### 📋 {_sel_day} — {len(_sel_acts)} attività")
                 for _cai, (_, _ar) in enumerate(_sel_acts.iterrows()):
-                    _asi     = get_sport_info(_ar["type"])
+                    _asi     = get_sport_info(_ar["type"], _ar.get("name",""))
                     _dist_km = _ar["distance"] / 1000
                     _hrs     = _ar["moving_time"] / 3600
                     _tss_v   = float(_ar.get("tss") or 0)
@@ -5399,23 +5335,23 @@ map.on('draw.delete', updateStats);
                     <div style="display:flex;gap:20px;flex-wrap:wrap;align-items:center">
                         <div style="text-align:center">
                             <div style="font-size:17px;font-weight:700;color:#111">{km_s:.1f}</div>
-                            <div style="font-size:10px;color:#555">km</div>
+                            <div style="font-size:12px;color:#555">km</div>
                         </div>
                         <div style="text-align:center">
                             <div style="font-size:17px;font-weight:700;color:#111">{int(ore_s)}h {int((ore_s%1)*60)}m</div>
-                            <div style="font-size:10px;color:#555">durata</div>
+                            <div style="font-size:12px;color:#555">durata</div>
                         </div>
                         <div style="text-align:center">
                             <div style="font-size:17px;font-weight:700;color:#111">{tss_s:.0f}</div>
-                            <div style="font-size:10px;color:#555">TSS</div>
+                            <div style="font-size:12px;color:#555">TSS</div>
                         </div>
                         <div style="text-align:center">
                             <div style="font-size:17px;font-weight:700;color:#111">{int(elev_s)}</div>
-                            <div style="font-size:10px;color:#555">↑ m</div>
+                            <div style="font-size:12px;color:#555">↑ m</div>
                         </div>
                         <div style="text-align:center">
                             <div style="font-size:17px;font-weight:700;color:#111">{fc_s}</div>
-                            <div style="font-size:10px;color:#555">FC avg</div>
+                            <div style="font-size:12px;color:#555">FC avg</div>
                         </div>
                     </div>
                     <div>{dkm_html}</div>
@@ -5460,7 +5396,7 @@ map.on('draw.delete', updateStats);
                 _mi = format_metrics(_tr)
                 _zn, _zc, _zl = get_zone_for_activity(_tr, u["fc_max"])
                 _is_bike = _tr["type"] in ("Ride","VirtualRide","MountainBikeRide")
-                _w_badge = (f" · ⚡{_mi['watts']}" + (" <span style='font-size:9px;color:#FF9800'>est.</span>"
+                _w_badge = (f" · ⚡{_mi['watts']}" + (" <span style='font-size:11px;color:#FF9800'>est.</span>"
                     if not _tr.get("device_watts",False) else "")) if _mi["watts"] != "N/A" else ""
                 _cc, _cb = st.columns([11, 1])
                 with _cc:
@@ -5483,7 +5419,7 @@ map.on('draw.delete', updateStats);
                             <span style="font-size:12px;color:#111">{_w_badge}</span>
                             <span style="font-size:12px;color:#111">📊 {_tr['tss']:.0f} TSS</span>
                             <span style="background:{_zc}22;color:{_zc};border:1px solid {_zc}55;
-                                         border-radius:4px;padding:1px 6px;font-size:10px;font-weight:700">{_zl}</span>
+                                         border-radius:4px;padding:1px 6px;font-size:12px;font-weight:700">{_zl}</span>
                         </div>
                     </div>""", unsafe_allow_html=True)
                 with _cb:
@@ -5951,6 +5887,58 @@ map.on('draw.delete', updateStats);
 
             st.session_state.messages.append({"role": "assistant", "content": res})
 
+        # Costruisci snapshot una volta sola per sessione (o se forzato)
+        if "coach_snapshot" not in st.session_state:
+            with st.spinner("Costruisco il contesto atleta..."):
+                st.session_state.coach_snapshot = build_athlete_snapshot(
+                    df=df, u=u,
+                    current_ctl=current_ctl, current_atl=current_atl,
+                    current_tsb=current_tsb, status_label=status_label,
+                    ctl_daily=ctl_daily, atl_daily=atl_daily, tsb_daily=tsb_daily,
+                    vo2max_val=vo2max_val,
+                    acwr_v2=acwr_v2, hrv_slope=hrv_slope, slr=slr,
+                    circadian=circadian, tss_budget=tss_budget,
+                    readiness=readiness, rc_vitals=rc_vitals, rc_sleep=rc_sleep,
+                )
+
+        _snapshot = st.session_state.coach_snapshot
+
+        # System prompt con snapshot completo
+        _system = (
+            "Sei un coach sportivo d'élite, esperto in fisiologia dell'esercizio, "
+            "pianificazione dell'allenamento e recupero. "
+            "Rispondi in italiano. Sii specifico, pratico e diretto. "
+            "Usa i dati forniti per dare consigli personalizzati e non generici. "
+            "Non ripetere tutti i dati che già conosci — usali per ragionare.\n\n"
+            + _snapshot
+        )
+
+        # Mostra storico messaggi
+        for msg in st.session_state.messages:
+            with st.chat_message(msg["role"]):
+                st.markdown(msg["content"])
+
+        if user_input := st.chat_input("Chiedi al tuo coach..."):
+            st.session_state.messages.append({"role": "user", "content": user_input})
+            with st.chat_message("user"):
+                st.markdown(user_input)
+
+            # Costruisci prompt con intero storico chat (multi-turno)
+            _full_prompt = _system + "\n\n"
+            for msg in st.session_state.messages:
+                _role = "Atleta" if msg["role"] == "user" else "Coach"
+                _full_prompt += f"{_role}: {msg['content']}\n"
+            _full_prompt += "Coach:"
+
+            with st.chat_message("assistant"):
+                with st.spinner(""):
+                    try:
+                        res = ai_generate(_full_prompt)
+                    except Exception as e:
+                        res = f"⚠️ Errore AI: {e}"
+                st.markdown(res)
+
+            st.session_state.messages.append({"role": "assistant", "content": res})
 
     # ============================================================
     # RECORD PERSONALI
@@ -6033,7 +6021,7 @@ map.on('draw.delete', updateStats);
                                 padding:12px 16px;text-align:center;margin-bottom:8px">
                         <div style="font-size:13px;font-weight:700;color:#2196F3">{_label}</div>
                         <div style="font-size:22px;font-weight:900;color:#111;margin:4px 0">{_val}</div>
-                        <div style="font-size:10px;color:#666">{_src}</div>
+                        <div style="font-size:12px;color:#666">{_src}</div>
                     </div>""", unsafe_allow_html=True)
                     if st.button(f"✅ Applica {_val}", key=f"auto_{_key}", use_container_width=True):
                         _ud = dict(st.session_state.user_data)
