@@ -326,60 +326,9 @@ def open_activity_button(row, key_suffix=""):
         st.rerun()
 
 
-
-def fetch_activity_streams(activity_id, access_token, stream_types=("heartrate","watts")):
-    """Recupera gli streams Strava (dati al secondo) per una singola attività.
-    Ritorna dict {stream_type: [valori]} o {} se errore/non disponibile.
-    """
-    if not activity_id or not access_token:
-        return {}
-    try:
-        keys = ",".join(stream_types)
-        url  = f"https://www.strava.com/api/v3/activities/{activity_id}/streams"
-        resp = requests.get(url, headers={"Authorization": f"Bearer {access_token}"},
-                            params={"keys": keys, "key_by_type": "true"}, timeout=8)
-        if resp.status_code != 200:
-            return {}
-        data = resp.json()
-        return {k: v.get("data", []) for k, v in data.items()}
-    except Exception:
-        return {}
-
-
-def calc_zone_times_from_streams(streams, fc_max, ftp, moving_time):
-    """Calcola secondi spesi in ogni zona FC e potenza dagli streams.
-    Ritorna (hr_zone_secs, pwr_zone_secs) dove ogni è lista di 5/7 secondi.
-    """
-    hr_zones_def  = [0.00, 0.60, 0.70, 0.80, 0.90, 1.00]  # 5 zone
-    pwr_zones_def = [0.00, 0.55, 0.75, 0.90, 1.05, 1.20, 1.50, 9.99]  # 7 zone
-
-    hr_secs  = [0] * 5
-    pwr_secs = [0] * 7
-
-    hr_data  = streams.get("heartrate", [])
-    pwr_data = streams.get("watts", [])
-
-    for hr in hr_data:
-        if hr and fc_max > 0:
-            pct = hr / fc_max
-            for zi in range(4, -1, -1):
-                if pct >= hr_zones_def[zi]:
-                    hr_secs[zi] += 1
-                    break
-
-    for w in pwr_data:
-        if w and ftp > 0:
-            pct = w / ftp
-            for zi in range(6, -1, -1):
-                if pct >= pwr_zones_def[zi]:
-                    pwr_secs[zi] += 1
-                    break
-
-    return hr_secs, pwr_secs
-
-def render_activity_detail(row, u, access_token, MAPBOX_TOKEN, draw_map, build_inline_map3d,
+def render_activity_detail(row, u, MAPBOX_TOKEN, draw_map, build_inline_map3d,
                             mapbox_render_allowed, mapbox_register_load, ai_generate,
-                            current_ctl, current_atl, current_tsb, status_label, df=None):
+                            current_ctl, current_atl, current_tsb, status_label):
     """Pagina dettaglio completa per una singola attività."""
     import streamlit.components.v1 as _components
     s   = get_sport_info(row["type"])
@@ -449,124 +398,53 @@ def render_activity_detail(row, u, access_token, MAPBOX_TOKEN, draw_map, build_i
 
     st.divider()
 
-    # ── Fetch streams (cached in session_state per activity) ──────────────
+    # Zone FC
     hr_avg    = row.get("average_heartrate")
     hr_max_a  = row.get("max_heartrate")
     fc_max    = u["fc_max"]
-    watts_avg = row.get("average_watts")
-    _act_id_s = str(row.get("id", ""))
-    _streams_key = f"streams_{_act_id_s}"
-
-    # Carica streams se non in cache
-    if _act_id_s and _streams_key not in st.session_state:
-        if access_token:
-            with st.spinner("⏳ Carico dati zone (Streams API)..."):
-                _streams = fetch_activity_streams(_act_id_s, access_token)
-                st.session_state[_streams_key] = _streams
-        else:
-            st.session_state[_streams_key] = {}
-
-    _streams = st.session_state.get(_streams_key, {})
-    _hr_secs, _pwr_secs = calc_zone_times_from_streams(
-        _streams, fc_max, ftp, row.get("moving_time", 1)
-    )
-    _total_hr_secs  = sum(_hr_secs)  or row.get("moving_time", 1) or 1
-    _total_pwr_secs = sum(_pwr_secs) or row.get("moving_time", 1) or 1
-    _has_streams    = bool(_streams)
-
-    def _fmt_time(secs):
-        h, rem = divmod(int(secs), 3600)
-        m, s   = divmod(rem, 60)
-        return f"{h}:{m:02d}:{s:02d}" if h > 0 else f"{m}:{s:02d}"
-
-    def _zone_bar_html(zone_label, zone_color, bpm_range, secs, total_secs, is_active, pct_label=""):
-        """Riga compatta stile Garmin: nome · barra · tempo · %"""
-        bar_pct  = min(100, secs / total_secs * 100) if total_secs > 0 else 0
-        t_str    = _fmt_time(secs) if secs > 0 else "—"
-        pct_str  = f"{bar_pct:.0f}%" if secs > 0 else "0%"
-        brd_left = f"border-left:3px solid {zone_color};" if is_active else ""
-        bg_row   = f"background:{zone_color}12;" if is_active else ""
-        return (
-            f'<div style="display:flex;align-items:center;gap:8px;padding:5px 8px;'
-            f'border-radius:8px;margin:3px 0;{bg_row}{brd_left}">'
-            f'  <div style="min-width:110px;font-size:12px;font-weight:{"700" if is_active else "500"};color:{"#111" if is_active else "#444"}">'
-            f'    <span style="color:{zone_color};font-weight:700">{zone_label}</span>'
-            f'    <span style="font-size:10px;color:#666;margin-left:4px">{bpm_range}</span>'
-            f'  </div>'
-            f'  <div style="flex:1;background:#e8e8e8;border-radius:4px;height:8px;overflow:hidden">'
-            f'    <div style="width:{bar_pct:.0f}%;height:100%;background:{zone_color};border-radius:4px;'
-            f'         transition:width 0.3s"></div>'
-            f'  </div>'
-            f'  <div style="min-width:52px;text-align:right;font-size:12px;font-weight:{"700" if is_active else "400"};color:{"#111" if is_active else "#555"}">{t_str}</div>'
-            f'  <div style="min-width:36px;text-align:right;font-size:11px;color:#888">{pct_str}</div>'
-            f'</div>'
-        )
-
-    # Zone FC
-    st.markdown("### ❤️ Tempo in Zone Frequenza Cardiaca")
-    _hr_zones_def = [
-        (1,"#9E9E9E","Z1 Recupero",0.00,0.60),
-        (2,"#4CAF50","Z2 Base",   0.60,0.70),
-        (3,"#FFC107","Z3 Aerobico",0.70,0.80),
-        (4,"#FF9800","Z4 Soglia",  0.80,0.90),
-        (5,"#F44336","Z5 Massima", 0.90,1.00),
-    ]
-
-    if not _has_streams:
-        st.caption("💡 Streams non disponibili — il grafico mostrerà la zona media stimata")
-
-    _hz_html = '<div style="background:#fafafa;border:1px solid #eee;border-radius:12px;padding:8px 12px">'
-    for _zi, (_zn,_zc,_zl,_zlo,_zhi) in enumerate(_hr_zones_def):
-        _blo = int(fc_max * _zlo)
-        _bhi = int(fc_max * _zhi) if _zhi < 1.0 else fc_max
-        _bpm_range = f"{_blo}–{_bhi} bpm"
-        if _has_streams:
-            _secs = _hr_secs[_zi] if _zi < len(_hr_secs) else 0
-        else:
-            # Stima: tutta la durata nella zona media se FC media cade in questa zona
-            _is_avg = bool(pd.notna(hr_avg) and fc_max > 0 and _zlo <= hr_avg/fc_max < _zhi)
-            _secs   = int(row.get("moving_time", 0)) if _is_avg else 0
-        _is_active = bool(pd.notna(hr_avg) and fc_max > 0 and _zlo <= hr_avg/fc_max < _zhi)
-        _hz_html += _zone_bar_html(_zl, _zc, _bpm_range, _secs, _total_hr_secs, _is_active)
-    _hz_html += '</div>'
-    st.markdown(_hz_html, unsafe_allow_html=True)
-
+    st.markdown("### ❤️ Zone Frequenza Cardiaca")
+    _hr_zones = [(1,"#4CAF50","Z1 Recupero",0.00,0.60),(2,"#8BC34A","Z2 Base",0.60,0.70),
+                 (3,"#FFC107","Z3 Aerobico",0.70,0.80),(4,"#FF9800","Z4 Soglia",0.80,0.90),
+                 (5,"#F44336","Z5 VO2max",0.90,1.00)]
+    _hz = st.columns(5)
+    for _zi, (_zn,_zc,_zl,_zlo,_zhi) in enumerate(_hr_zones):
+        _blo, _bhi = int(fc_max*_zlo), int(fc_max*_zhi)
+        _cur = pd.notna(hr_avg) and fc_max>0 and _zlo <= hr_avg/fc_max < _zhi
+        _hz[_zi].markdown(f"""<div style="background:{_zc}{'20' if _cur else '08'};
+            border:{'3' if _cur else '1'}px solid {_zc}{'ff' if _cur else '44'};
+            border-radius:10px;padding:10px;text-align:center">
+            <div style="font-size:11px;font-weight:700;color:{_zc}">{_zl}</div>
+            <div style="font-size:12px;color:#555">{_blo}–{_bhi} bpm</div>
+            {"<div style='font-size:12px;font-weight:900;color:" + _zc + "'>← attività<br>" + f"{hr_avg/fc_max*100:.0f}% FCmax</div>" if _cur else ""}
+            </div>""", unsafe_allow_html=True)
     if pd.notna(hr_avg) and fc_max > 0:
-        st.caption(f"FC media: **{hr_avg:.0f} bpm** ({hr_avg/fc_max*100:.0f}% FCmax) → **{z_l}**"
-                   + (f" | FC max: **{hr_max_a:.0f} bpm** ({hr_max_a/fc_max*100:.0f}%)" if pd.notna(hr_max_a) else "")
-                   + ("" if _has_streams else " · *zona stimata da FC media*"))
+        st.caption(f"FC media: {hr_avg:.0f} bpm ({hr_avg/fc_max*100:.0f}% FCmax) → **{z_l}**" +
+                   (f" | FC max attività: {hr_max_a:.0f} bpm ({hr_max_a/fc_max*100:.0f}% FCmax)" if pd.notna(hr_max_a) else ""))
 
     # Zone Potenza (solo bici)
+    watts_avg = row.get("average_watts")
     if is_bike and pd.notna(watts_avg) and watts_avg and watts_avg > 0 and ftp > 0:
         st.divider()
-        st.markdown(f"### ⚡ Tempo in Zone Potenza  *(FTP: {ftp} W)*")
+        st.markdown(f"### ⚡ Zone di Potenza  *(FTP: {ftp} W)*")
         if is_estimated:
-            st.caption("⚠️ Watt stimati da Strava — valori indicativi (errore 15-40% su MTB/sterrato)")
-        _pwr_zones_def = [
-            (1,"#9E9E9E","Z1 Recupero",   0.00,0.55),
-            (2,"#4CAF50","Z2 Resistenza",  0.55,0.75),
-            (3,"#8BC34A","Z3 Tempo",       0.75,0.90),
-            (4,"#FFC107","Z4 Soglia",      0.90,1.05),
-            (5,"#FF9800","Z5 VO2max",      1.05,1.20),
-            (6,"#FF5722","Z6 Anaerobico",  1.20,1.50),
-            (7,"#F44336","Z7 Neuromuscol.",1.50,9.99),
-        ]
+            st.caption("⚠️ Watt stimati da Strava — valori indicativi")
+        _pwr_zones = [(1,"#9E9E9E","Z1 Recupero",0.00,0.55),(2,"#4CAF50","Z2 Resistenza",0.55,0.75),
+                      (3,"#8BC34A","Z3 Tempo",0.75,0.90),(4,"#FFC107","Z4 Soglia",0.90,1.05),
+                      (5,"#FF9800","Z5 VO2max",1.05,1.20),(6,"#FF5722","Z6 Anaerobico",1.20,1.50),
+                      (7,"#F44336","Z7 Neuromuscolare",1.50,9.99)]
+        _pz = st.columns(7)
         _wpct = watts_avg / ftp
-        _pz_html = '<div style="background:#fafafa;border:1px solid #eee;border-radius:12px;padding:8px 12px">'
-        for _zi, (_zn,_zc,_zl_p,_zlo,_zhi) in enumerate(_pwr_zones_def):
-            _wlo = int(ftp * _zlo)
+        for _zi, (_zn,_zc,_zl_p,_zlo,_zhi) in enumerate(_pwr_zones):
+            _wlo = int(ftp*_zlo)
             _whi = f"{int(ftp*_zhi)}" if _zhi < 9 else "+"
-            _w_range = f"{_wlo}–{_whi} W"
-            if _has_streams:
-                _secs = _pwr_secs[_zi] if _zi < len(_pwr_secs) else 0
-            else:
-                _is_avg = (_zlo <= _wpct < _zhi)
-                _secs   = int(row.get("moving_time", 0)) if _is_avg else 0
-            _is_active = (_zlo <= _wpct < _zhi)
-            _pz_html += _zone_bar_html(_zl_p, _zc, _w_range, _secs, _total_pwr_secs, _is_active)
-        _pz_html += '</div>'
-        st.markdown(_pz_html, unsafe_allow_html=True)
-
+            _cur = _zlo <= _wpct < _zhi
+            _pz[_zi].markdown(f"""<div style="background:{_zc}{'20' if _cur else '08'};
+                border:{'3' if _cur else '1'}px solid {_zc}{'ff' if _cur else '44'};
+                border-radius:10px;padding:8px;text-align:center">
+                <div style="font-size:10px;font-weight:700;color:{_zc}">{_zl_p}</div>
+                <div style="font-size:11px;color:#555">{_wlo}–{_whi} W</div>
+                {"<div style='font-size:10px;font-weight:900;color:" + _zc + "'>← attività</div>" if _cur else ""}
+                </div>""", unsafe_allow_html=True)
         _if_val = watts_avg / ftp
         _tss_p  = (row["moving_time"] * watts_avg * _if_val) / (ftp * 3600) * 100
         _pc1, _pc2, _pc3 = st.columns(3)
@@ -1369,8 +1247,6 @@ const canvas = map.getCanvas();
 canvas.addEventListener('wheel', (e) => {{
   e.stopPropagation();
 }}, {{ passive: false }});
-map.getContainer().addEventListener('mouseenter', () => {{ document.body.style.overflow = 'hidden'; }});
-map.getContainer().addEventListener('mouseleave', () => {{ document.body.style.overflow = ''; }});
 
 // ── Rotazione con tasto centrale del mouse (click rotella + trascina) ──
 (function() {{
@@ -2330,41 +2206,28 @@ if token_ok:
     # ============================================================
     # DASHBOARD
     # ============================================================
-    # ── DETTAGLIO ATTIVITÀ — intercetta ma rispetta il menu ──────
-    # Se l'utente clicca su un'altra voce del menu, il dettaglio si chiude
-    _detail_menu_key = "detail_opened_from_menu"
+    # ── DETTAGLIO ATTIVITÀ — intercetta qualunque sezione ──────
     if st.session_state.get("selected_activity_id") is not None:
-        # Se il menu è cambiato rispetto a quando è stato aperto il dettaglio,
-        # chiudi il dettaglio e lascia il rendering normale del menu
-        _prev_menu = st.session_state.get(_detail_menu_key)
-        if _prev_menu is not None and _prev_menu != menu:
-            st.session_state.selected_activity_id = None
-            st.session_state.pop(_detail_menu_key, None)
-        else:
-            # Registra da quale menu è stato aperto
-            st.session_state[_detail_menu_key] = menu
-            _sel_id  = st.session_state.selected_activity_id
-            _sel_row = df[df["id"] == _sel_id] if "id" in df.columns else pd.DataFrame()
-            if _sel_row.empty:
-                try:
-                    _sel_row = df.iloc[[int(_sel_id)]]
-                except Exception:
-                    pass
-            if not _sel_row.empty:
-                render_activity_detail(
-                    row=_sel_row.iloc[0], u=u,
-                    access_token=st.session_state.strava_token_info.get("access_token"),
-                    MAPBOX_TOKEN=MAPBOX_TOKEN,
-                    draw_map=draw_map,
-                    build_inline_map3d=build_inline_map3d,
-                    mapbox_render_allowed=mapbox_render_allowed,
-                    mapbox_register_load=mapbox_register_load,
-                    ai_generate=ai_generate,
-                    current_ctl=current_ctl, current_atl=current_atl,
-                    current_tsb=current_tsb, status_label=status_label,
-                    df=df,
-                )
-                st.stop()
+        _sel_id = st.session_state.selected_activity_id
+        _sel_row = df[df["id"] == _sel_id] if "id" in df.columns else pd.DataFrame()
+        if _sel_row.empty:
+            try:
+                _sel_row = df.iloc[[int(_sel_id)]]
+            except Exception:
+                pass
+        if not _sel_row.empty:
+            render_activity_detail(
+                row=_sel_row.iloc[0], u=u,
+                MAPBOX_TOKEN=MAPBOX_TOKEN,
+                draw_map=draw_map,
+                build_inline_map3d=build_inline_map3d,
+                mapbox_render_allowed=mapbox_render_allowed,
+                mapbox_register_load=mapbox_register_load,
+                ai_generate=ai_generate,
+                current_ctl=current_ctl, current_atl=current_atl,
+                current_tsb=current_tsb, status_label=status_label,
+            )
+            st.stop()
 
     if menu == "📊 Dashboard":
         st.markdown("## 📊 Performance Hub")
@@ -2634,105 +2497,77 @@ if token_ok:
             s   = get_sport_info(row["type"])
             m   = format_metrics(row)
             z_n, z_c, z_l = get_zone_for_activity(row, u["fc_max"])
-            _is_bike = row["type"] in ("Ride","VirtualRide","MountainBikeRide")
-            _pace_label = "Velocità" if _is_bike else "Passo"
 
             with st.container():
                 _cc, _cb = st.columns([11, 1])
                 with _cc:
-                    # Scheda bianca con testi scuri e bordo colorato
                     st.markdown(f"""
-                    <div style="background:#ffffff;border:1px solid {s['color']}55;
-                                border-left:4px solid {s['color']};border-radius:12px;
-                                padding:14px 18px;margin:6px 0;box-shadow:0 1px 4px rgba(0,0,0,0.06)">
-                        <div style="display:flex;align-items:center;justify-content:space-between;
-                                    margin-bottom:10px;flex-wrap:wrap;gap:6px">
-                            <div style="display:flex;align-items:center;gap:8px">
-                                <span style="font-size:22px">{s['icon']}</span>
-                                <div>
-                                    <div style="font-size:15px;font-weight:700;color:#111">{row['name']}</div>
-                                    <div style="font-size:11px;color:#666">{row['start_date'].strftime('%d %b %Y · %H:%M')} — {s['label']}</div>
-                                </div>
-                            </div>
-                            <span style="background:{z_c}18;color:{z_c};border:1px solid {z_c}44;
-                                         border-radius:6px;padding:2px 8px;font-size:11px;font-weight:700">{z_l}</span>
+                    <div class="activity-card" style="border-color: {s['color']}40;">
+                        <div class="activity-header" style="color:{s['color']}">
+                            {s['icon']} {row['name']}
+                            <span style="font-size:12px; color:#888; font-weight:400; margin-left:8px">
+                                {row['start_date'].strftime('%d %b %Y · %H:%M')}
+                            </span>
+                            <span class="zone-badge" style="background:{z_c}22; color:{z_c}; border:1px solid {z_c}44; float:right; font-size:12px">
+                                {z_l}
+                            </span>
                         </div>
-                        <div style="display:flex;flex-wrap:wrap;gap:8px">
-                            <div style="background:#f5f5f5;border-radius:8px;padding:6px 12px;text-align:center;min-width:60px">
-                                <div style="font-size:14px;font-weight:700;color:#111">{m['dist_str']}</div>
-                                <div style="font-size:10px;color:#666">distanza</div>
-                            </div>
-                            <div style="background:#f5f5f5;border-radius:8px;padding:6px 12px;text-align:center;min-width:60px">
-                                <div style="font-size:14px;font-weight:700;color:#111">{m['dur_str']}</div>
-                                <div style="font-size:10px;color:#666">durata</div>
-                            </div>
-                            <div style="background:#f5f5f5;border-radius:8px;padding:6px 12px;text-align:center;min-width:60px">
-                                <div style="font-size:14px;font-weight:700;color:#111">{m['pace_str']}</div>
-                                <div style="font-size:10px;color:#666">{_pace_label}</div>
-                            </div>
-                            <div style="background:#f5f5f5;border-radius:8px;padding:6px 12px;text-align:center;min-width:60px">
-                                <div style="font-size:14px;font-weight:700;color:#111">{m['elev']}</div>
-                                <div style="font-size:10px;color:#666">dislivello</div>
-                            </div>
-                            <div style="background:#f5f5f5;border-radius:8px;padding:6px 12px;text-align:center;min-width:60px">
-                                <div style="font-size:14px;font-weight:700;color:#111">{m['hr_avg']}</div>
-                                <div style="font-size:10px;color:#666">FC media</div>
-                            </div>
-                            <div style="background:#f5f5f5;border-radius:8px;padding:6px 12px;text-align:center;min-width:60px">
-                                <div style="font-size:14px;font-weight:700;color:#111">{m['watts']}</div>
-                                <div style="font-size:10px;color:#666">watt avg</div>
-                            </div>
-                            <div style="background:{s['color']}15;border-radius:8px;padding:6px 12px;text-align:center;min-width:60px;border:1px solid {s['color']}33">
-                                <div style="font-size:14px;font-weight:700;color:{s['color']}">{row['tss']:.0f}</div>
-                                <div style="font-size:10px;color:#666">TSS</div>
-                            </div>
-                            <div style="background:#f5f5f5;border-radius:8px;padding:6px 12px;text-align:center;min-width:60px">
-                                <div style="font-size:14px;font-weight:700;color:#111">{m['calories']}</div>
-                                <div style="font-size:10px;color:#666">kcal</div>
-                            </div>
+                        <div class="metric-row">
+                            <div class="metric-pill">📏 Distanza <span>{m['dist_str']}</span></div>
+                            <div class="metric-pill">⏱️ Durata <span>{m['dur_str']}</span></div>
+                            <div class="metric-pill">⚡ {('Passo' if row['type'] not in ('Ride','VirtualRide','MountainBikeRide') else 'Velocità')} <span>{m['pace_str']}</span></div>
+                            <div class="metric-pill">⛰️ Dislivello <span>{m['elev']}</span></div>
+                            <div class="metric-pill">❤️ FC Media <span>{m['hr_avg']}</span></div>
+                            <div class="metric-pill">💓 FC Max <span>{m['hr_max']}</span></div>
+                            <div class="metric-pill">🔄 Cadenza <span>{m['cadence']}</span></div>
+                            <div class="metric-pill">⚡ Watt <span>{m['watts']}</span></div>
+                            <div class="metric-pill">🔥 Calorie <span>{m['calories']}</span></div>
+                            <div class="metric-pill">📊 TSS <span>{row['tss']:.1f}</span></div>
+                            <div class="metric-pill">😓 Suffer Score <span>{m['suffer']}</span></div>
                         </div>
                     </div>
                     """, unsafe_allow_html=True)
                 with _cb:
-                    st.markdown("<div style='height:18px'></div>", unsafe_allow_html=True)
+                    st.markdown("<div style='height:14px'></div>", unsafe_allow_html=True)
                     open_activity_button(row, key_suffix=f"dash_{idx}")
 
-            # Mappa SOLO per la prima attività (la più recente)
-            if idx == 0:
-                _poly = row.get("map", {})
-                _poly = _poly.get("summary_polyline") if isinstance(_poly, dict) else None
-                if _poly:
-                    _mb_ok, _ = mapbox_render_allowed()
-                    _tab2d, _tab3d = st.tabs(["🗺️ Mappa 2D", "🏔️ Mappa 3D"])
-                    with _tab2d:
-                        _mobj = draw_map(_poly)
-                        if _mobj:
-                            _mc, _minfo = st.columns([3, 1])
-                            with _mc:
-                                st_folium(_mobj, width=None, height=260, key=f"map_{idx}")
-                            with _minfo:
-                                st.markdown(f"**Sport:** {s['label']}")
-                                st.markdown(f"**Data:** {row['start_date'].strftime('%d %b')}")
-                                st.markdown(f"**Zona:** {z_l}")
-                                _pct = (row.get('average_heartrate',0) or 0) / u['fc_max'] * 100
-                                st.markdown(f"**%FC:** {_pct:.0f}%")
-                    with _tab3d:
-                        if not MAPBOX_TOKEN:
-                            st.info("Configura MAPBOX_TOKEN per la mappa 3D.")
-                        elif not _mb_ok:
-                            st.warning("Limite Mapbox raggiunto.")
-                        else:
-                            _eg = float(row.get("total_elevation_gain") or 0)
-                            _h3d = build_inline_map3d(_poly, MAPBOX_TOKEN,
-                                      sport_type=row.get("type",""), elev_gain=_eg, height=340)
-                            if _h3d:
-                                import streamlit.components.v1 as components
-                                components.html(_h3d, height=350, scrolling=False)
-                                mapbox_register_load()
+            # Mappa per tutte e 3 le attività
+            _poly = row.get("map", {})
+            _poly = _poly.get("summary_polyline") if isinstance(_poly, dict) else None
+            if _poly:
+                _mb_ok, _ = mapbox_render_allowed()
+                _tab2d, _tab3d = st.tabs(["🗺️ Mappa 2D", "🏔️ Mappa 3D"])
+                with _tab2d:
+                    _mobj = draw_map(_poly)
+                    if _mobj:
+                        _mc, _minfo = st.columns([3, 1])
+                        with _mc:
+                            st_folium(_mobj, width=None, height=260, key=f"map_{idx}")
+                        with _minfo:
+                            st.markdown(f"**Sport:** {s['label']}")
+                            st.markdown(f"**Data:** {row['start_date'].strftime('%d %b')}")
+                            st.markdown(f"**Zona:** {z_l}")
+                            _pct = (row.get('average_heartrate',0) or 0) / u['fc_max'] * 100
+                            st.markdown(f"**%FC:** {_pct:.0f}%")
+                with _tab3d:
+                    if not MAPBOX_TOKEN:
+                        st.info("Configura MAPBOX_TOKEN per la mappa 3D.")
+                    elif not _mb_ok:
+                        st.warning("Limite Mapbox raggiunto.")
+                    else:
+                        _eg = float(row.get("total_elevation_gain") or 0)
+                        _h3d = build_inline_map3d(_poly, MAPBOX_TOKEN,
+                                  sport_type=row.get("type",""), elev_gain=_eg, height=340)
+                        if _h3d:
+                            import streamlit.components.v1 as components
+                            components.html(_h3d, height=350, scrolling=False)
+                            mapbox_register_load()
 
-                # AI Analisi solo per la prima
+            # --- AI Analisi: solo per la prima attività (la più recente) ---
+            if idx == 0:
                 with st.expander("🤖 Analisi Coach", expanded=True):
-                    _act_id   = str(row.get("id", row["start_date"]))
+                    # Cache in session_state — non ricalcolare se stessa attività
+                    _act_id = str(row.get("id", row["start_date"]))
                     _cache_key = f"ai_analysis_{_act_id}"
                     if _cache_key in st.session_state:
                         st.info(st.session_state[_cache_key])
@@ -4435,8 +4270,6 @@ map.scrollZoom.setWheelZoomRate(1/450);
 (function() {{
   const cv = map.getCanvas();
   cv.addEventListener('wheel', (e) => {{ e.stopPropagation(); }}, {{ passive: false }});
-  map.getContainer().addEventListener('mouseenter', () => {{ document.body.style.overflow = 'hidden'; }});
-  map.getContainer().addEventListener('mouseleave', () => {{ document.body.style.overflow = ''; }});
   let mid = false, lx = 0, ly = 0;
   cv.addEventListener('mousedown', (e) => {{
     if (e.button === 1) {{ e.preventDefault(); mid = true; lx = e.clientX; ly = e.clientY; cv.style.cursor = 'grab'; }}
@@ -4630,8 +4463,6 @@ map.scrollZoom.setWheelZoomRate(1/450);
 (function() {{
   const cv = map.getCanvas();
   cv.addEventListener('wheel', (e) => {{ e.stopPropagation(); }}, {{ passive: false }});
-  map.getContainer().addEventListener('mouseenter', () => {{ document.body.style.overflow = 'hidden'; }});
-  map.getContainer().addEventListener('mouseleave', () => {{ document.body.style.overflow = ''; }});
   let mid = false, lx = 0, ly = 0;
   cv.addEventListener('mousedown', (e) => {{
     if (e.button === 1) {{ e.preventDefault(); mid = true; lx = e.clientX; ly = e.clientY; cv.style.cursor = 'grab'; }}
@@ -4829,8 +4660,6 @@ map.scrollZoom.setWheelZoomRate(1/450);
 (function() {{
   const cv = map.getCanvas();
   cv.addEventListener('wheel', (e) => {{ e.stopPropagation(); }}, {{ passive: false }});
-  map.getContainer().addEventListener('mouseenter', () => {{ document.body.style.overflow = 'hidden'; }});
-  map.getContainer().addEventListener('mouseleave', () => {{ document.body.style.overflow = ''; }});
   let mid = false, lx = 0, ly = 0;
   cv.addEventListener('mousedown', (e) => {{
     if (e.button === 1) {{ e.preventDefault(); mid = true; lx = e.clientX; ly = e.clientY; cv.style.cursor = 'grab'; }}
@@ -5130,8 +4959,7 @@ map.on('draw.delete', updateStats);
                 _hcols = st.columns(7)
                 for _di, _dn in enumerate(_DAY_NAMES):
                     _hcols[_di].markdown(
-                        f"<div style='text-align:center;font-size:14px;color:#333;font-weight:700;"
-                        f"letter-spacing:0.04em;padding:2px 0 6px'>{_dn}</div>",
+                        f"<div style='text-align:center;font-size:11px;color:#444;font-weight:700'>{_dn}</div>",
                         unsafe_allow_html=True)
 
                 # Griglia settimane
@@ -5160,66 +4988,26 @@ map.on('draw.delete', updateStats);
 
                             _num_col = "#e94560" if _is_tod else "#111" if _in_m else "#bbb"
 
-                            # Cella giorno: icona + km + durata + TSS (stile Garmin/Suunto)
-                            if _has_act and _in_m:
-                                _day_tss = float(_dacts["tss"].fillna(0).sum())
-                                _day_km  = float(_dacts["distance"].fillna(0).sum()) / 1000
-                                _day_sec = float(_dacts["moving_time"].fillna(0).sum())
-                                _day_h   = int(_day_sec // 3600)
-                                _day_mn  = int((_day_sec % 3600) // 60)
-                                _dur_str = f"{_day_h}h{_day_mn:02d}" if _day_h > 0 else f"{_day_mn}m"
-                                _tss_alpha = min(0.20, _day_tss / 150 * 0.20)
-                                _dom_sport = _dacts["type"].value_counts().index[0]
-                                _dom_si    = get_sport_info(_dom_sport)
-                                _r_hex = int(_dom_si["color"][1:3], 16)
-                                _g_hex = int(_dom_si["color"][3:5], 16)
-                                _b_hex = int(_dom_si["color"][5:7], 16)
-                                _heat_bg  = f"rgba({_r_hex},{_g_hex},{_b_hex},{_tss_alpha:.2f})"
-                                if _sel:
-                                    _bg2, _brd2 = "rgba(233,69,96,0.14)", "2px solid #e94560"
-                                elif _is_tod:
-                                    _bg2, _brd2 = "rgba(33,150,243,0.12)", "2px solid #2196F3"
-                                else:
-                                    _bg2  = _heat_bg
-                                    _brd2 = f"1px solid {_dom_si['color']}55"
-                                # Icone + stats per attività (max 3)
-                                _rows_html = ""
-                                for _ai2, (_, _ar) in enumerate(_dacts.head(3).iterrows()):
-                                    _asi2 = get_sport_info(_ar["type"])
-                                    _km2  = _ar["distance"] / 1000
-                                    _sec2 = _ar["moving_time"]
-                                    _h2   = int(_sec2 // 3600)
-                                    _m2   = int((_sec2 % 3600) // 60)
-                                    _d2   = f"{_h2}h{_m2:02d}" if _h2 > 0 else f"{_m2}m"
-                                    _rows_html += (
-                                        f'<div style="display:flex;align-items:center;gap:2px;margin:1px 0;'
-                                        f'justify-content:center" title="{_asi2["label"]} {_km2:.1f}km {_d2}">'
-                                        f'<span style="font-size:11px">{_asi2["icon"]}</span>'
-                                        f'<span style="font-size:8px;color:#333;font-weight:600;line-height:1">{_km2:.0f}k</span>'
-                                        f'<span style="font-size:7px;color:#666;line-height:1">{_d2}</span>'
-                                        f'</div>'
-                                    )
-                                if len(_dacts) > 3:
-                                    _rows_html += f'<div style="font-size:7px;color:#888;text-align:center">+{len(_dacts)-3}</div>'
-                                _tss_color = "#d32f2f" if _day_tss >= 120 else "#e65100" if _day_tss >= 70 else "#2e7d32"
-                                st.markdown(
-                                    f'<div style="background:{_bg2};border:{_brd2};border-radius:10px;'
-                                    f'padding:4px 3px 3px;min-height:62px;pointer-events:none;overflow:hidden">'
-                                    f'<div style="font-size:12px;font-weight:700;color:{_num_col};line-height:1;'
-                                    f'     padding:0 3px 2px">{_day.day}</div>'
-                                    f'{_rows_html}'
-                                    f'<div style="font-size:8px;font-weight:700;color:{_tss_color};'
-                                    f'     text-align:center;margin-top:1px">TSS {_day_tss:.0f}</div>'
-                                    f'</div>',
-                                    unsafe_allow_html=True)
-                            else:
-                                st.markdown(
-                                    f'<div style="background:{_bg};border:{_brd};border-radius:10px;'
-                                    f'padding:4px 3px 3px;min-height:62px;pointer-events:none">'
-                                    f'<div style="font-size:12px;font-weight:{"700" if _in_m else "400"};'
-                                    f'     color:{_num_col};line-height:1;padding:0 3px">{_day.day if _in_m else ""}</div>'
-                                    f'</div>',
-                                    unsafe_allow_html=True)
+                            # Pallini sport
+                            _dots = ""
+                            if _has_act:
+                                for _, _ar in _dacts.head(4).iterrows():
+                                    _asi  = get_sport_info(_ar["type"])
+                                    _tss  = float(_ar.get("tss") or 0)
+                                    _sz   = max(7, min(15, int(_tss/7) + 7))
+                                    _title = f"{_asi['label']} {_ar['distance']/1000:.1f}km TSS:{_tss:.0f}"
+                                    _dots += (f'<div title="{_title}" style="width:{_sz}px;height:{_sz}px;'
+                                              f'border-radius:50%;background:{_asi["color"]};display:inline-block;margin:1px"></div>')
+                                if len(_dacts) > 4:
+                                    _dots += f'<span style="font-size:9px;color:#888">+{len(_dacts)-4}</span>'
+
+                            st.markdown(
+                                f'<div style="background:{_bg};border:{_brd};border-radius:10px;'
+                                f'padding:5px 3px 4px;min-height:56px;text-align:center;pointer-events:none">'
+                                f'<div style="font-size:12px;font-weight:700;color:{_num_col}">{_day.day if _in_m else ""}</div>'
+                                f'<div style="display:flex;flex-wrap:wrap;justify-content:center;gap:1px;margin-top:3px">{_dots}</div>'
+                                f'</div>',
+                                unsafe_allow_html=True)
 
                             # Bottone click — solo sui giorni con attività
                             if _has_act and _in_m:
@@ -5994,58 +5782,6 @@ map.on('draw.delete', updateStats);
 
             st.session_state.messages.append({"role": "assistant", "content": res})
 
-        # Costruisci snapshot una volta sola per sessione (o se forzato)
-        if "coach_snapshot" not in st.session_state:
-            with st.spinner("Costruisco il contesto atleta..."):
-                st.session_state.coach_snapshot = build_athlete_snapshot(
-                    df=df, u=u,
-                    current_ctl=current_ctl, current_atl=current_atl,
-                    current_tsb=current_tsb, status_label=status_label,
-                    ctl_daily=ctl_daily, atl_daily=atl_daily, tsb_daily=tsb_daily,
-                    vo2max_val=vo2max_val,
-                    acwr_v2=acwr_v2, hrv_slope=hrv_slope, slr=slr,
-                    circadian=circadian, tss_budget=tss_budget,
-                    readiness=readiness, rc_vitals=rc_vitals, rc_sleep=rc_sleep,
-                )
-
-        _snapshot = st.session_state.coach_snapshot
-
-        # System prompt con snapshot completo
-        _system = (
-            "Sei un coach sportivo d'élite, esperto in fisiologia dell'esercizio, "
-            "pianificazione dell'allenamento e recupero. "
-            "Rispondi in italiano. Sii specifico, pratico e diretto. "
-            "Usa i dati forniti per dare consigli personalizzati e non generici. "
-            "Non ripetere tutti i dati che già conosci — usali per ragionare.\n\n"
-            + _snapshot
-        )
-
-        # Mostra storico messaggi
-        for msg in st.session_state.messages:
-            with st.chat_message(msg["role"]):
-                st.markdown(msg["content"])
-
-        if user_input := st.chat_input("Chiedi al tuo coach..."):
-            st.session_state.messages.append({"role": "user", "content": user_input})
-            with st.chat_message("user"):
-                st.markdown(user_input)
-
-            # Costruisci prompt con intero storico chat (multi-turno)
-            _full_prompt = _system + "\n\n"
-            for msg in st.session_state.messages:
-                _role = "Atleta" if msg["role"] == "user" else "Coach"
-                _full_prompt += f"{_role}: {msg['content']}\n"
-            _full_prompt += "Coach:"
-
-            with st.chat_message("assistant"):
-                with st.spinner(""):
-                    try:
-                        res = ai_generate(_full_prompt)
-                    except Exception as e:
-                        res = f"⚠️ Errore AI: {e}"
-                st.markdown(res)
-
-            st.session_state.messages.append({"role": "assistant", "content": res})
 
     # ============================================================
     # RECORD PERSONALI
