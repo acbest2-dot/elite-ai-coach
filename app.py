@@ -2362,6 +2362,7 @@ if token_ok:
                     current_ctl=current_ctl, current_atl=current_atl,
                     current_tsb=current_tsb, status_label=status_label,
                     access_token=st.session_state.strava_token_info.get("access_token"),
+                    df=df,
                 )
                 st.stop()
 
