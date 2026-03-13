@@ -2543,9 +2543,9 @@ if token_ok:
 
         st.divider()
 
-        # --- Ultime 3 attività ---
-        st.markdown("### 🕐 Ultime 3 Attività")
-        last3 = df.iloc[-3:][::-1]
+        # --- Ultime 5 attività ---
+        st.markdown("### 🕐 Ultime 5 Attività")
+        last3 = df.iloc[-5:][::-1]
 
         for idx, (_, row) in enumerate(last3.iterrows()):
             s   = get_sport_info(row["type"], row.get("name",""))
@@ -2585,7 +2585,7 @@ if token_ok:
                     st.markdown("<div style='height:14px'></div>", unsafe_allow_html=True)
                     open_activity_button(row, key_suffix=f"dash_{idx}")
 
-            # Mappa per tutte e 3 le attività
+            # Mappa per tutte le attività
             _poly = row.get("map", {})
             _poly = _poly.get("summary_polyline") if isinstance(_poly, dict) else None
             if _poly:
@@ -2600,6 +2600,8 @@ if token_ok:
                         with _minfo:
                             st.markdown(f"**Sport:** {s['label']}")
                             st.markdown(f"**Data:** {row['start_date'].strftime('%d %b')}")
+                            st.markdown(f"**Distanza:** {m['dist_str']}")
+                            st.markdown(f"**Durata:** {m['dur_str']}")
                             st.markdown(f"**Zona:** {z_l}")
                             _pct = (row.get('average_heartrate',0) or 0) / u['fc_max'] * 100
                             st.markdown(f"**%FC:** {_pct:.0f}%")
@@ -2959,8 +2961,6 @@ if token_ok:
                                ("0–1h",   "#FF5722", 24, 25),
                                ("> 1h",   "#F44336", 25, 30)]
                     _hr_adj = _hr.apply(lambda h: h + 24 if h < 4 else h)
-                    _counts = {b[0]: int((_hr_adj >= b[2]) & (_hr_adj < b[3])).sum()
-                                for b in _bands}
                     _counts = {b[0]: int(((_hr_adj >= b[2]) & (_hr_adj < b[3])).sum())
                                 for b in _bands}
                     _tot = max(sum(_counts.values()), 1)
@@ -3436,27 +3436,25 @@ if token_ok:
         st.markdown("### 🔬 Capacità Aerobica & Performance")
         col_vo2, col_race, col_vi = st.columns(3)
 
+        def _vo2_card(val, label_method, color_override=None):
+            if val >= 65:   vc, vl = "#9C27B0", "🏆 Élite"
+            elif val >= 55: vc, vl = "#4CAF50", "🥇 Molto Buono"
+            elif val >= 45: vc, vl = "#2196F3", "🥈 Buono"
+            elif val >= 35: vc, vl = "#FF9800", "🥉 Media"
+            else:            vc, vl = "#F44336", "📈 Da Migliorare"
+            if color_override: vc = color_override
+            return (f"<div style='background:{vc}15;border:1px solid {vc}44;border-radius:10px;"
+                    f"padding:10px 14px;margin-bottom:8px;display:flex;align-items:center;gap:12px'>"
+                    f"<div style='font-size:32px;font-weight:900;color:{vc};min-width:54px;text-align:center'>{val:.0f}</div>"
+                    f"<div>"
+                    f"<div style='font-size:11px;color:#888;font-weight:600'>{label_method}</div>"
+                    f"<div style='font-size:13px;color:{vc};font-weight:700'>{vl}</div>"
+                    f"<div style='font-size:10px;color:#666'>ml/kg/min</div>"
+                    f"</div></div>")
+
         with col_vo2:
             st.markdown("**VO2max — Corsa & Bici**")
             metric_tooltip("VO2MAX")
-
-            def _vo2_card(val, label_method, color_override=None):
-                if val >= 65:   vc, vl = "#9C27B0", "🏆 Élite"
-                elif val >= 55: vc, vl = "#4CAF50", "🥇 Molto Buono"
-                elif val >= 45: vc, vl = "#2196F3", "🥈 Buono"
-                elif val >= 35: vc, vl = "#FF9800", "🥉 Media"
-                else:            vc, vl = "#F44336", "📈 Da Migliorare"
-                if color_override: vc = color_override
-                return f"""<div style="background:{vc}15;border:1px solid {vc}44;border-radius:10px;
-                    padding:10px 14px;margin-bottom:8px;display:flex;align-items:center;gap:12px">
-                    <div style="font-size:32px;font-weight:900;color:{vc};min-width:54px;text-align:center">{val:.0f}</div>
-                    <div>
-                        <div style="font-size:11px;color:#888;font-weight:600">{label_method}</div>
-                        <div style="font-size:13px;color:{vc};font-weight:700">{vl}</div>
-                        <div style="font-size:10px;color:#666">ml/kg/min</div>
-                    </div>
-                </div>"""
-
             _has_vo2 = False
             # ── Stima da corsa (Daniels VDOT) ──
             if vo2max_val:
@@ -3529,7 +3527,7 @@ if token_ok:
         col_ai1, col_ai2 = st.columns(2)
 
         with col_ai1:
-            st.markdown("#### Analisi Fisiolologica Completa")
+            st.markdown("#### Analisi Fisiologica Completa")
             if st.button("🔍 Genera Analisi", key="btn_analisi", use_container_width=True):
                 with st.spinner("Analisi in corso..."):
                     try:
