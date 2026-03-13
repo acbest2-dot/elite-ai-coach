@@ -25,6 +25,7 @@ CLIENT_ID     = get_secret("STRAVA_CLIENT_ID")
 CLIENT_SECRET = get_secret("STRAVA_CLIENT_SECRET")
 GEMINI_KEY    = get_secret("GOOGLE_API_KEY")
 GROK_KEY      = get_secret("GROK_API_KEY") or get_secret("XAI_API_KEY") or ""
+ORS_API_KEY   = get_secret("ORS_API_KEY") or ""   # OpenRouteService — gratuito su openrouteservice.org
 MAPBOX_TOKEN  = get_secret("MAPBOX_TOKEN") or ""
 MAPBOX_MONTHLY_LIMIT  = 50_000   # Free tier ufficiale Mapbox GL JS
 MAPBOX_DAILY_SOFT_CAP = 200      # Soglia soft giornaliera (50k/30gg ≈ 1666/gg, usiamo 200 come extra-safe)
@@ -2113,6 +2114,7 @@ if token_ok:
             "💪 Stato Fisico",
             "😴 Recupero & Sonno",
             "💬 Coach Chat",
+            "🗺️ Planning Route",
             "🧬 Metriche Avanzate",
             "📅 Storico & Calendario",
             "🗺️ Mappe 3D",
@@ -2167,6 +2169,40 @@ if token_ok:
                 return response.text
             else:
                 return _ai_client.GenerativeModel(sel_model).generate_content(prompt).text
+
+        def ai_generate_model(prompt: str, model_id: str, max_tokens: int = 2000) -> str:
+            """Come ai_generate ma con modello esplicito — per routing Gemini 2.5 Pro / Grok."""
+            if _ai_sdk_mode is None:
+                raise RuntimeError("Nessun provider AI configurato.")
+            if _ai_sdk_mode == "grok":
+                resp = _ai_client.chat.completions.create(
+                    model=model_id,
+                    messages=[{"role": "user", "content": prompt}],
+                    max_tokens=max_tokens,
+                )
+                return resp.choices[0].message.content
+            elif _ai_sdk_mode == "new":
+                _is_15 = "1.5" in model_id
+                _cl = _ai_client_v1a if (_is_15 and _ai_client_v1a) else _ai_client
+                response = _cl.models.generate_content(
+                    model=model_id.replace("models/", ""),
+                    contents=prompt,
+                )
+                return response.text
+            else:
+                return _ai_client.GenerativeModel(model_id).generate_content(prompt).text
+
+        def ai_fast(prompt: str) -> str:
+            """Risposta veloce — usa Grok se disponibile, altrimenti Flash."""
+            _fast_model = "grok-3-beta" if _ai_sdk_mode == "grok" else "gemini-2.0-flash"
+            return ai_generate_model(prompt, _fast_model, max_tokens=1000)
+
+        def ai_deep(prompt: str) -> str:
+            """Analisi approfondita — usa Gemini 2.5 Pro, fallback su modello selezionato."""
+            try:
+                return ai_generate_model(prompt, "gemini-2.5-pro-preview-03-25", max_tokens=2500)
+            except Exception:
+                return ai_generate(prompt)
 
         st.divider()
         col_s1, col_s2, col_s3 = st.columns(3)
@@ -5847,6 +5883,600 @@ map.on('draw.delete', updateStats);
     # ============================================================
     # COACH CHAT
     # ============================================================
+
+    # ============================================================
+    # PLANNING ROUTE
+    # ============================================================
+    elif menu == "🗺️ Planning Route":
+        st.markdown("## 🗺️ Planning Route")
+        st.caption("Pianifica percorsi per Trail Running, Scialpinismo, Bici da Strada e MTB")
+
+        # ── Costanti ──
+        DEFAULT_LAT, DEFAULT_LON = 42.0369, 13.4256   # Avezzano (AQ)
+        ORS_PROFILES = {
+            "🏔️ Trail Running":  "foot-hiking",
+            "🎿 Scialpinismo":   "foot-hiking",
+            "🚴 Bici da Strada": "cycling-road",
+            "🚵 MTB":            "cycling-mountain",
+        }
+
+        # ── Session state init ──
+        for _k, _v in [
+            ("pr_sport",       "🏔️ Trail Running"),
+            ("pr_waypoints",   []),
+            ("pr_routes",      []),     # lista di route generate (coordinate + stats)
+            ("pr_active_idx",  0),
+            ("pr_gpx_loaded",  None),
+            ("pr_chat_hist",   []),
+            ("pr_show_heat",   True),
+        ]:
+            if _k not in st.session_state:
+                st.session_state[_k] = _v
+
+        # ── Layout: sidebar sinistra + mappa destra ──
+        col_ctrl, col_map = st.columns([1, 2])
+
+        with col_ctrl:
+            # ── Selettore sport ──
+            _sport = st.selectbox("🏅 Sport", list(ORS_PROFILES.keys()),
+                                   index=list(ORS_PROFILES.keys()).index(st.session_state.pr_sport),
+                                   key="pr_sport_sel")
+            st.session_state.pr_sport = _sport
+
+            # ── Toggle heatmap ──
+            _show_heat = st.toggle("🔥 Mostra Heatmap Strava", value=st.session_state.pr_show_heat,
+                                    key="pr_heat_tog")
+            st.session_state.pr_show_heat = _show_heat
+
+            st.divider()
+
+            # ── Tab: AI Chat / Manuale / GPX ──
+            _ptab_ai, _ptab_man, _ptab_gpx = st.tabs(["🤖 Chiedi all'AI", "✏️ Crea Manuale", "📂 Carica GPX"])
+
+            with _ptab_ai:
+                st.markdown("**Descrivi il percorso che vuoi:**")
+                st.caption("Es: *Voglio fare 35km e 1800m attorno al Monte Sirente* oppure *Un giro MTB da Avezzano che passi per Celano e Ovindoli*")
+
+                # Storico chat
+                for _msg in st.session_state.pr_chat_hist[-6:]:
+                    _role_icon = "🧑" if _msg["role"] == "user" else "🤖"
+                    st.markdown(f"**{_role_icon}** {_msg['content'][:200]}{'...' if len(_msg['content'])>200 else ''}")
+
+                _pr_input = st.text_area("La tua richiesta:", height=90, key="pr_chat_input",
+                                          placeholder="Es: voglio fare un trail di 20km con 1200m di dislivello partendo da Rocca di Cambio...")
+                if st.button("🗺️ Genera Percorsi", use_container_width=True, key="pr_gen_btn") and _pr_input.strip():
+                    with st.spinner("L'AI sta pianificando 3 varianti..."):
+                        try:
+                            # Step 1: AI estrae parametri
+                            _extract_prompt = f"""Sei un esperto di pianificazione percorsi outdoor in Abruzzo e dintorni.
+Dall'utente: "{_pr_input}"
+Sport selezionato: {_sport}
+Posizione default se non specificata: Avezzano (AQ), coordinate 42.0369, 13.4256
+
+Estrai i parametri e rispondi SOLO con JSON (nessun testo prima/dopo):
+{{
+  "start_lat": float,
+  "start_lon": float,
+  "target_km": float or null,
+  "target_elev_m": float or null,
+  "waypoints_text": ["nome1", "nome2"],
+  "loop": true/false,
+  "area_hint": "descrizione area",
+  "difficulty": "facile/medio/difficile",
+  "notes": "note percorso"
+}}
+Se non specificato: start = Avezzano, target_km = 20, loop = true."""
+
+                            _raw_params = ai_fast(_extract_prompt)
+                            import json, re as _re
+                            _clean = _re.sub(r"```(?:json)?|```", "", _raw_params).strip()
+                            try:
+                                _params = json.loads(_clean)
+                            except Exception:
+                                _params = {"start_lat": DEFAULT_LAT, "start_lon": DEFAULT_LON,
+                                           "target_km": 20, "target_elev_m": None,
+                                           "waypoints_text": [], "loop": True,
+                                           "area_hint": _pr_input, "difficulty": "medio", "notes": ""}
+
+                            _slat = float(_params.get("start_lat") or DEFAULT_LAT)
+                            _slon = float(_params.get("start_lon") or DEFAULT_LON)
+                            _tkm  = float(_params.get("target_km") or 20)
+                            _tel  = _params.get("target_elev_m")
+                            _loop = _params.get("loop", True)
+
+                            # Step 2: genera 3 varianti via ORS
+                            _ors_profile = ORS_PROFILES[_sport]
+                            _routes_found = []
+
+                            # Variante 1: andata e ritorno circolare (se loop)
+                            # Variante 2: con waypoint intermedi diversi
+                            # Variante 3: profilo altimetrico diverso
+                            _variants = [
+                                {"name": "Variante A — Circolare Principale",
+                                 "options": {"round_trip": {"length": _tkm * 1000, "points": 3, "seed": 42}}},
+                                {"name": "Variante B — Percorso Alternativo",
+                                 "options": {"round_trip": {"length": _tkm * 1000, "points": 5, "seed": 137}}},
+                                {"name": "Variante C — Giro Più Corto",
+                                 "options": {"round_trip": {"length": _tkm * 800, "points": 3, "seed": 7}}},
+                            ]
+
+                            if ORS_API_KEY:
+                                import requests as _req
+                                for _var in _variants:
+                                    try:
+                                        _ors_url = "https://api.openrouteservice.org/v2/directions/" + _ors_profile + "/geojson"
+                                        _ors_body = {
+                                            "coordinates": [[_slon, _slat]],
+                                            "options": _var["options"],
+                                            "elevation": True,
+                                            "instructions": False,
+                                        }
+                                        _ors_resp = _req.post(_ors_url, json=_ors_body,
+                                            headers={"Authorization": ORS_API_KEY, "Content-Type": "application/json"},
+                                            timeout=15)
+                                        if _ors_resp.status_code == 200:
+                                            _gj = _ors_resp.json()
+                                            _feat = _gj["features"][0]
+                                            _seg  = _feat["properties"]["segments"][0]
+                                            _coords = _feat["geometry"]["coordinates"]  # [lon, lat, elev]
+                                            _dist_km = _seg["distance"] / 1000
+                                            _dur_min = _seg["duration"] / 60
+                                            # Calcola dislivello positivo
+                                            _ascent = 0
+                                            if len(_coords[0]) >= 3:
+                                                for _ci in range(1, len(_coords)):
+                                                    _dh = _coords[_ci][2] - _coords[_ci-1][2]
+                                                    if _dh > 0: _ascent += _dh
+                                            _routes_found.append({
+                                                "name": _var["name"],
+                                                "coords": [[c[1], c[0]] for c in _coords],  # lat,lon
+                                                "coords_3d": _coords,
+                                                "dist_km": round(_dist_km, 1),
+                                                "ascent_m": round(_ascent),
+                                                "dur_min": round(_dur_min),
+                                                "params": _params,
+                                            })
+                                        else:
+                                            _routes_found.append({
+                                                "name": _var["name"] + " (routing N/D)",
+                                                "coords": [[_slat, _slon]],
+                                                "coords_3d": [],
+                                                "dist_km": _tkm, "ascent_m": 0, "dur_min": 0,
+                                                "params": _params,
+                                                "error": f"ORS {_ors_resp.status_code}",
+                                            })
+                                    except Exception as _e:
+                                        _routes_found.append({
+                                            "name": _var["name"] + " (errore)",
+                                            "coords": [[_slat, _slon]],
+                                            "coords_3d": [],
+                                            "dist_km": _tkm, "ascent_m": 0, "dur_min": 0,
+                                            "params": _params,
+                                            "error": str(_e),
+                                        })
+                            else:
+                                # Senza ORS: crea percorsi simulati come punti attorno alla partenza
+                                import math as _math
+                                for _vi, _var in enumerate(_variants):
+                                    _r_deg = (_tkm * (0.8 + _vi*0.1)) / 111  # gradi approssimativi
+                                    _n_pts = 12
+                                    _sim_coords = []
+                                    for _pi in range(_n_pts + 1):
+                                        _ang = 2 * _math.pi * _pi / _n_pts
+                                        _sim_coords.append([
+                                            _slat + _r_deg * _math.sin(_ang),
+                                            _slon + _r_deg * _math.cos(_ang)
+                                        ])
+                                    _routes_found.append({
+                                        "name": _var["name"] + " (simulato — configura ORS_API_KEY)",
+                                        "coords": _sim_coords,
+                                        "coords_3d": [],
+                                        "dist_km": _tkm * (0.8 + _vi*0.1),
+                                        "ascent_m": int((_tel or 800) * (0.8 + _vi*0.1)),
+                                        "dur_min": int(_tkm * 6),
+                                        "params": _params,
+                                    })
+
+                            st.session_state.pr_routes    = _routes_found
+                            st.session_state.pr_active_idx = 0
+                            st.session_state.pr_chat_hist.append({"role": "user", "content": _pr_input})
+
+                            # Step 3: AI commenta le varianti
+                            if _routes_found:
+                                _r0 = _routes_found[0]
+                                _ai_comment_prompt = (
+                                    f"Sei un coach outdoor esperto di Abruzzo. L'utente vuole: '{_pr_input}'. "
+                                    f"Ho generato 3 varianti di percorso {_sport} partendo da lat={_slat:.4f}, lon={_slon:.4f}. "
+                                    f"Variante principale: {_r0['dist_km']:.1f}km, +{_r0['ascent_m']}m D+, ~{_r0['dur_min']:.0f}min. "
+                                    f"Commenta brevemente le 3 varianti (max 3 righe ciascuna), suggerisci quale è più adatta "
+                                    f"e aggiungi 2 consigli pratici per questo tipo di percorso ({_sport}). "
+                                    f"Rispondi in italiano, diretto e pratico."
+                                )
+                                _ai_comment = ai_fast(_ai_comment_prompt)
+                                st.session_state.pr_chat_hist.append({"role": "assistant", "content": _ai_comment})
+
+                            st.rerun()
+                        except Exception as _e:
+                            st.error(f"Errore generazione: {_e}")
+
+            with _ptab_man:
+                st.markdown("**Crea percorso manuale**")
+                st.caption("Aggiungi coordinate waypoint. Sulla mappa puoi vedere i punti.")
+                _wps = st.session_state.pr_waypoints
+
+                # Input waypoint
+                _wp_lat = st.number_input("Latitudine", value=DEFAULT_LAT, format="%.4f", key="pr_wp_lat")
+                _wp_lon = st.number_input("Longitudine", value=DEFAULT_LON, format="%.4f", key="pr_wp_lon")
+                _wp_name = st.text_input("Nome punto (opzionale)", key="pr_wp_name")
+                _c1, _c2 = st.columns(2)
+                with _c1:
+                    if st.button("➕ Aggiungi", use_container_width=True, key="pr_add_wp"):
+                        _wps.append({"lat": _wp_lat, "lon": _wp_lon, "name": _wp_name or f"P{len(_wps)+1}"})
+                        st.session_state.pr_waypoints = _wps
+                        st.rerun()
+                with _c2:
+                    if st.button("🗑️ Svuota", use_container_width=True, key="pr_clear_wp"):
+                        st.session_state.pr_waypoints = []
+                        st.session_state.pr_routes = []
+                        st.rerun()
+
+                if _wps:
+                    st.markdown(f"**{len(_wps)} waypoint:**")
+                    for _i, _wp in enumerate(_wps):
+                        _wcols = st.columns([3, 1])
+                        _wcols[0].caption(f"{_wp['name']} — {_wp['lat']:.4f}, {_wp['lon']:.4f}")
+                        if _wcols[1].button("✕", key=f"pr_del_{_i}"):
+                            _wps.pop(_i)
+                            st.session_state.pr_waypoints = _wps
+                            st.rerun()
+
+                    # Calcola distanza totale
+                    import math as _math2
+                    def _haversine(la1, lo1, la2, lo2):
+                        R = 6371
+                        dlat = _math2.radians(la2-la1); dlon = _math2.radians(lo2-lo1)
+                        a = _math2.sin(dlat/2)**2 + _math2.cos(_math2.radians(la1))*_math2.cos(_math2.radians(la2))*_math2.sin(dlon/2)**2
+                        return R * 2 * _math2.asin(_math2.sqrt(a))
+
+                    _total_km = sum(_haversine(_wps[i]["lat"], _wps[i]["lon"],
+                                               _wps[i+1]["lat"], _wps[i+1]["lon"])
+                                    for i in range(len(_wps)-1))
+                    st.metric("Distanza lineare totale", f"{_total_km:.1f} km")
+
+                    if len(_wps) >= 2 and ORS_API_KEY:
+                        if st.button("🗺️ Calcola percorso su sentieri", use_container_width=True, key="pr_calc_man"):
+                            with st.spinner("Calcolo percorso..."):
+                                try:
+                                    import requests as _req2
+                                    _ors_profile = ORS_PROFILES[_sport]
+                                    _ors_url2 = "https://api.openrouteservice.org/v2/directions/" + _ors_profile + "/geojson"
+                                    _ors_body2 = {
+                                        "coordinates": [[w["lon"], w["lat"]] for w in _wps],
+                                        "elevation": True, "instructions": False,
+                                    }
+                                    _ors_r2 = _req2.post(_ors_url2, json=_ors_body2,
+                                        headers={"Authorization": ORS_API_KEY, "Content-Type": "application/json"},
+                                        timeout=20)
+                                    if _ors_r2.status_code == 200:
+                                        _gj2 = _ors_r2.json()
+                                        _feat2 = _gj2["features"][0]
+                                        _seg2  = _feat2["properties"]["segments"][0]
+                                        _coords2 = _feat2["geometry"]["coordinates"]
+                                        _dist2 = _seg2["distance"] / 1000
+                                        _asc2 = sum(
+                                            max(0, _coords2[i][2] - _coords2[i-1][2])
+                                            for i in range(1, len(_coords2)) if len(_coords2[i]) >= 3
+                                        )
+                                        _route_man = {
+                                            "name": f"Percorso manuale — {len(_wps)} tappe",
+                                            "coords": [[c[1], c[0]] for c in _coords2],
+                                            "coords_3d": _coords2,
+                                            "dist_km": round(_dist2, 1),
+                                            "ascent_m": round(_asc2),
+                                            "dur_min": round(_seg2["duration"] / 60),
+                                            "params": {},
+                                        }
+                                        st.session_state.pr_routes = [_route_man]
+                                        st.session_state.pr_active_idx = 0
+                                        st.success(f"✅ {_dist2:.1f} km · +{_asc2:.0f}m D+")
+                                        st.rerun()
+                                    else:
+                                        st.error(f"ORS error {_ors_r2.status_code}: {_ors_r2.text[:200]}")
+                                except Exception as _e2:
+                                    st.error(f"Errore routing: {_e2}")
+
+            with _ptab_gpx:
+                st.markdown("**Carica un file GPX esistente**")
+                _gpx_file = st.file_uploader("GPX file", type=["gpx"], key="pr_gpx_up")
+                if _gpx_file:
+                    try:
+                        import xml.etree.ElementTree as ET
+                        _tree = ET.parse(_gpx_file)
+                        _root = _tree.getroot()
+                        _ns_map = {"gpx": "http://www.topografix.com/GPX/1/1",
+                                   "gpx0": "http://www.topografix.com/GPX/1/0"}
+                        _ns = "gpx" if "topografix.com/GPX/1/1" in _root.tag else "gpx0"
+                        _nsp = "{http://www.topografix.com/GPX/1/1}" if _ns == "gpx" else "{http://www.topografix.com/GPX/1/0}"
+
+                        _trkpts = _root.findall(f".//{_nsp}trkpt")
+                        if not _trkpts:
+                            _trkpts = _root.findall(".//trkpt")
+
+                        _coords_gpx = []
+                        for _pt in _trkpts:
+                            _lat2 = float(_pt.get("lat", 0))
+                            _lon2 = float(_pt.get("lon", 0))
+                            _ele_el = _pt.find(f"{_nsp}ele") or _pt.find("ele")
+                            _ele2 = float(_ele_el.text) if _ele_el is not None else 0
+                            _coords_gpx.append([_lat2, _lon2, _ele2])
+
+                        if _coords_gpx:
+                            import math as _mg
+                            _dist_gpx = sum(
+                                _mg.sqrt((_coords_gpx[i][0]-_coords_gpx[i-1][0])**2 +
+                                         (_coords_gpx[i][1]-_coords_gpx[i-1][1])**2) * 111
+                                for i in range(1, len(_coords_gpx))
+                            )
+                            _asc_gpx = sum(max(0, _coords_gpx[i][2]-_coords_gpx[i-1][2])
+                                           for i in range(1, len(_coords_gpx)))
+                            _route_gpx = {
+                                "name": f"📂 {_gpx_file.name}",
+                                "coords": [[c[0], c[1]] for c in _coords_gpx],
+                                "coords_3d": [[c[1], c[0], c[2]] for c in _coords_gpx],  # lon,lat,ele per mapbox
+                                "dist_km": round(_dist_gpx, 1),
+                                "ascent_m": round(_asc_gpx),
+                                "dur_min": 0,
+                                "params": {},
+                            }
+                            st.session_state.pr_routes = [_route_gpx]
+                            st.session_state.pr_active_idx = 0
+                            st.session_state.pr_gpx_loaded = _gpx_file.name
+                            st.success(f"✅ {len(_coords_gpx)} punti · {_dist_gpx:.1f}km · +{_asc_gpx:.0f}m")
+                            st.rerun()
+                    except Exception as _eg:
+                        st.error(f"Errore lettura GPX: {_eg}")
+
+            st.divider()
+
+            # ── Route selector + stats ──
+            _routes = st.session_state.pr_routes
+            if _routes:
+                st.markdown("**Percorsi disponibili:**")
+                for _ri, _rt in enumerate(_routes):
+                    _is_active = _ri == st.session_state.pr_active_idx
+                    _btn_style = "primary" if _is_active else "secondary"
+                    _stats = f"{_rt['dist_km']:.1f}km · +{_rt['ascent_m']}m"
+                    _prefix = "▶ " if _is_active else ""
+                    _btn_label = f"{_prefix}{_rt['name'][:28]} — {_stats}"
+                    if st.button(_btn_label,
+                                  key=f"pr_sel_{_ri}", type=_btn_style, use_container_width=True):
+                        st.session_state.pr_active_idx = _ri
+                        st.rerun()
+
+                # ── Export GPX ──
+                _act_route = _routes[st.session_state.pr_active_idx]
+                if _act_route.get("coords"):
+                    _gpx_export = '<?xml version="1.0" encoding="UTF-8"?>\n'
+                    _gpx_export += '<gpx version="1.1" creator="Elite AI Coach Pro" '
+                    _gpx_export += 'xmlns="http://www.topografix.com/GPX/1/1">\n'
+                    _gpx_export += f'  <metadata><name>{_act_route["name"]}</name></metadata>\n'
+                    _gpx_export += '  <trk><name>' + _act_route["name"] + '</name><trkseg>\n'
+                    for _c3 in _act_route["coords"]:
+                        _elev_str = ""
+                        if _act_route.get("coords_3d"):
+                            # Trova elevazione corrispondente
+                            _idx_c = _act_route["coords"].index(_c3) if _c3 in _act_route["coords"] else 0
+                            if _idx_c < len(_act_route["coords_3d"]):
+                                _elev_str = f"<ele>{_act_route['coords_3d'][_idx_c][2]:.1f}</ele>"
+                        _gpx_export += f'    <trkpt lat="{_c3[0]:.6f}" lon="{_c3[1]:.6f}">{_elev_str}</trkpt>\n'
+                    _gpx_export += '  </trkseg></trk>\n</gpx>'
+                    st.download_button(
+                        "⬇️ Esporta GPX", data=_gpx_export,
+                        file_name=f"route_{_act_route['name'][:20].replace(' ','_')}.gpx",
+                        mime="application/gpx+xml", use_container_width=True, key="pr_gpx_dl"
+                    )
+
+        with col_map:
+            _routes = st.session_state.pr_routes
+            _act_idx = st.session_state.pr_active_idx
+            _act_route = _routes[_act_idx] if _routes else None
+
+            if not MAPBOX_TOKEN:
+                st.warning("⚠️ Configura **MAPBOX_TOKEN** nei Secrets per visualizzare la mappa 3D.")
+                st.info("Puoi comunque generare e scaricare percorsi GPX anche senza la mappa.")
+            else:
+                # ── Costruisci mappa 3D Mapbox con heatmap + percorso ──
+                _center_lat = _act_route["coords"][0][0] if _act_route and _act_route["coords"] else DEFAULT_LAT
+                _center_lon = _act_route["coords"][0][1] if _act_route and _act_route["coords"] else DEFAULT_LON
+
+                # Prepara GeoJSON linee percorso (tutte le varianti)
+                _route_geojson_features = []
+                _route_colors = ["#e94560", "#2196F3", "#4CAF50", "#FF9800"]
+                if _routes:
+                    for _ri, _rt in enumerate(_routes):
+                        if _rt.get("coords") and len(_rt["coords"]) > 1:
+                            _is_act = _ri == _act_idx
+                            _route_geojson_features.append({
+                                "type": "Feature",
+                                "properties": {
+                                    "name": _rt["name"],
+                                    "color": _route_colors[_ri % len(_route_colors)],
+                                    "width": 5 if _is_act else 2,
+                                    "opacity": 1.0 if _is_act else 0.4,
+                                },
+                                "geometry": {
+                                    "type": "LineString",
+                                    "coordinates": [[c[1], c[0]] for c in _rt["coords"]]
+                                }
+                            })
+
+                # Waypoint markers
+                _wp_geojson_features = []
+                for _i, _wp in enumerate(st.session_state.pr_waypoints):
+                    _wp_geojson_features.append({
+                        "type": "Feature",
+                        "properties": {"name": _wp["name"], "idx": _i},
+                        "geometry": {"type": "Point", "coordinates": [_wp["lon"], _wp["lat"]]}
+                    })
+
+                # Route GeoJSON string
+                import json as _json2
+                _route_gj_str = _json2.dumps({
+                    "type": "FeatureCollection",
+                    "features": _route_geojson_features
+                })
+                _wp_gj_str = _json2.dumps({
+                    "type": "FeatureCollection",
+                    "features": _wp_geojson_features
+                })
+
+                _heat_url = "https://heatmap-external-a.strava.com/tiles/all/hot/{z}/{x}/{y}.png"
+                _show_heat_js = "true" if st.session_state.pr_show_heat else "false"
+
+                _map_html = f"""<!DOCTYPE html><html><head>
+<meta charset="utf-8">
+<script src="https://api.mapbox.com/mapbox-gl-js/v2.15.0/mapbox-gl.js"></script>
+<link href="https://api.mapbox.com/mapbox-gl-js/v2.15.0/mapbox-gl.css" rel="stylesheet">
+<style>html,body,#map{{margin:0;padding:0;height:100%;width:100%;}}
+.info-panel{{position:absolute;top:10px;right:10px;background:rgba(0,0,0,0.75);color:#fff;
+  padding:10px 14px;border-radius:10px;font-family:sans-serif;font-size:13px;min-width:160px;z-index:10}}
+</style>
+</head><body>
+<div id="map"></div>
+<div class="info-panel" id="info">
+  {"<br>".join([
+    f"<b style=\"color:{_route_colors[i % len(_route_colors)]}\">{rt['name'][:25]}</b><br>{rt['dist_km']:.1f}km · +{rt['ascent_m']}m"
+    for i, rt in enumerate(_routes)
+  ]) if _routes else "Nessun percorso"}
+</div>
+<script>
+mapboxgl.accessToken = "{MAPBOX_TOKEN}";
+var map = new mapboxgl.Map({{
+  container: "map",
+  style: "mapbox://styles/mapbox/outdoors-v12",
+  center: [{_center_lon}, {_center_lat}],
+  zoom: 11, pitch: 50, bearing: 0
+}});
+
+map.on("load", function() {{
+  // Heatmap Strava layer
+  if ({_show_heat_js}) {{
+    map.addSource("strava-heat", {{
+      "type": "raster",
+      "tiles": ["{_heat_url}"],
+      "tileSize": 256,
+      "attribution": "© Strava"
+    }});
+    map.addLayer({{
+      "id": "strava-heatmap",
+      "type": "raster",
+      "source": "strava-heat",
+      "paint": {{"raster-opacity": 0.55}}
+    }}, "road-label");
+  }}
+
+  // Percorsi
+  var routeData = {_route_gj_str};
+  map.addSource("routes", {{"type": "geojson", "data": routeData}});
+  map.addLayer({{
+    "id": "routes-line",
+    "type": "line",
+    "source": "routes",
+    "paint": {{
+      "line-color": ["get", "color"],
+      "line-width": ["get", "width"],
+      "line-opacity": ["get", "opacity"]
+    }}
+  }});
+
+  // Waypoint markers
+  var wpData = {_wp_gj_str};
+  map.addSource("waypoints", {{"type": "geojson", "data": wpData}});
+  map.addLayer({{
+    "id": "wp-circles",
+    "type": "circle",
+    "source": "waypoints",
+    "paint": {{
+      "circle-color": "#FF9800",
+      "circle-radius": 8,
+      "circle-stroke-color": "#fff",
+      "circle-stroke-width": 2
+    }}
+  }});
+
+  // Punto di partenza (primo punto del percorso attivo)
+  {'var startPt = { "type": "FeatureCollection", "features": [{ "type": "Feature", "geometry": { "type": "Point", "coordinates": [' + str(_act_route["coords"][0][1]) + ', ' + str(_act_route["coords"][0][0]) + '] }, "properties": {} }] };' if _act_route and _act_route.get("coords") else 'var startPt = { "type": "FeatureCollection", "features": [] };'}
+  map.addSource("start-pt", {{"type": "geojson", "data": startPt}});
+  map.addLayer({{
+    "id": "start-circle",
+    "type": "circle",
+    "source": "start-pt",
+    "paint": {{
+      "circle-color": "#4CAF50",
+      "circle-radius": 10,
+      "circle-stroke-color": "#fff",
+      "circle-stroke-width": 3
+    }}
+  }});
+
+  // Terrain 3D
+  map.addSource("mapbox-dem", {{
+    "type": "raster-dem",
+    "url": "mapbox://mapbox.mapbox-terrain-dem-v1",
+    "tileSize": 512
+  }});
+  map.setTerrain({{"source": "mapbox-dem", "exaggeration": 1.5}});
+  map.addLayer({{
+    "id": "sky",
+    "type": "sky",
+    "paint": {{
+      "sky-type": "atmosphere",
+      "sky-atmosphere-sun": [0.0, 90.0],
+      "sky-atmosphere-sun-intensity": 15
+    }}
+  }});
+
+  map.addControl(new mapboxgl.NavigationControl());
+}});
+</script>
+</body></html>"""
+
+                import streamlit.components.v1 as _comp
+                _comp.html(_map_html, height=600, scrolling=False)
+
+            # ── Profilo altimetrico ──
+            if _act_route and _act_route.get("coords_3d") and len(_act_route["coords_3d"]) > 2:
+                st.markdown("##### 📈 Profilo Altimetrico")
+                import math as _mh
+                _c3d = _act_route["coords_3d"]
+                _dists_km = [0.0]
+                for _ci in range(1, len(_c3d)):
+                    _dlat = _c3d[_ci][1] - _c3d[_ci-1][1]
+                    _dlon = _c3d[_ci][0] - _c3d[_ci-1][0]
+                    _dd   = _mh.sqrt(_dlat**2 + _dlon**2) * 111
+                    _dists_km.append(_dists_km[-1] + _dd)
+                _eles = [c[2] for c in _c3d]
+                # Campiona max 200 punti per fluidità
+                _step = max(1, len(_dists_km) // 200)
+                _xs = _dists_km[::_step]
+                _ys = _eles[::_step]
+                fig_elev = go.Figure(go.Scatter(
+                    x=_xs, y=_ys, mode="lines",
+                    fill="tozeroy", fillcolor="rgba(33,150,243,0.12)",
+                    line=dict(color="#2196F3", width=2),
+                ))
+                fig_elev.update_layout(
+                    paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                    height=180, margin=dict(l=0,r=0,t=10,b=0),
+                    xaxis=dict(title="km", gridcolor="rgba(255,255,255,0.08)"),
+                    yaxis=dict(title="m slm", gridcolor="rgba(255,255,255,0.08)"),
+                )
+                st.plotly_chart(fig_elev, use_container_width=True)
+
+            # ── Note ORS se non configurato ──
+            if not ORS_API_KEY:
+                st.info("💡 Aggiungi **ORS_API_KEY** nei Secrets per ottenere percorsi reali su sentieri OSM (gratuito su openrouteservice.org/dev)")
+
     elif menu == "💬 Coach Chat":
         st.markdown("## 💬 Parla con il tuo Coach")
 
