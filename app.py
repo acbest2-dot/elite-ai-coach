@@ -234,16 +234,13 @@ SPORT_INFO_EXTRA = {
 _ALL_SPORT_INFO = {**SPORT_INFO, **SPORT_INFO_EXTRA}
 PRIMARY_SPORTS = ["Run", "TrailRun", "Ride", "MountainBikeRide",
                   "BackcountrySki", "AlpineSki", "VirtualRide"]
-# Sport mostrati nel filtro calendario (esclude VirtualRide dal filtro visivo
-# ma mantiene il riconoscimento per statistiche)
 CALENDAR_FILTER_SPORTS = ["Run", "TrailRun", "Ride", "MountainBikeRide",
                            "BackcountrySki", "AlpineSki"]
 
 def get_sport_info(a_type, name=""):
-    """Ritorna info sport. Se type=Ride ma nome contiene MTB/mountain/gravel, usa MountainBikeRide."""
     if a_type == "Ride" and name:
-        _name_lower = name.lower()
-        if any(k in _name_lower for k in ["mtb","mountain","gravel","sterrato","trail","enduro","xc "]):
+        _n = name.lower()
+        if any(k in _n for k in ["mtb","mountain","gravel","sterrato","trail","enduro","xc "]):
             a_type = "MountainBikeRide"
     return _ALL_SPORT_INFO.get(a_type, {"icon": "🏅", "label": a_type, "color": "#9E9E9E"})
 
@@ -451,9 +448,9 @@ def render_activity_detail(row, u, MAPBOX_TOKEN, draw_map, build_inline_map3d,
             _pz[_zi].markdown(f"""<div style="background:{_zc}{'20' if _cur else '08'};
                 border:{'3' if _cur else '1'}px solid {_zc}{'ff' if _cur else '44'};
                 border-radius:10px;padding:8px;text-align:center">
-                <div style="font-size:12px;font-weight:700;color:{_zc}">{_zl_p}</div>
+                <div style="font-size:10px;font-weight:700;color:{_zc}">{_zl_p}</div>
                 <div style="font-size:11px;color:#555">{_wlo}–{_whi} W</div>
-                {"<div style='font-size:12px;font-weight:900;color:" + _zc + "'>← attività</div>" if _cur else ""}
+                {"<div style='font-size:10px;font-weight:900;color:" + _zc + "'>← attività</div>" if _cur else ""}
                 </div>""", unsafe_allow_html=True)
         _if_val = watts_avg / ftp
         _tss_p  = (row["moving_time"] * watts_avg * _if_val) / (ftp * 3600) * 100
@@ -469,11 +466,7 @@ def render_activity_detail(row, u, MAPBOX_TOKEN, draw_map, build_inline_map3d,
     _aid = str(row.get("id", str(row["start_date"])))
     _ck  = f"ai_analysis_{_aid}"
     if _ck in st.session_state:
-        st.markdown(
-            f'<div style="background:#f8f9fa;border:1px solid #dee2e6;border-left:4px solid {s["color"]};'
-            f'border-radius:8px;padding:16px 20px;color:#212529;font-size:14px;line-height:1.7">'
-            f'{st.session_state[_ck]}</div>',
-            unsafe_allow_html=True)
+        st.info(st.session_state[_ck])
     else:
         if st.button("🤖 Genera analisi AI", key="det_ai_btn"):
             with st.spinner("Analisi in corso..."):
@@ -487,11 +480,7 @@ def render_activity_detail(row, u, MAPBOX_TOKEN, draw_map, build_inline_map3d,
                         "Commenta questa sessione in 3-4 paragrafi: qualità allenamento, zone di lavoro, "
                         "impatto sul carico, suggerimento concreto per la prossima sessione.")
                     st.session_state[_ck] = _res
-                    st.markdown(
-                        f'<div style="background:#f8f9fa;border:1px solid #dee2e6;border-left:4px solid {s["color"]};'
-                        f'border-radius:8px;padding:16px 20px;color:#212529;font-size:14px;line-height:1.7">'
-                        f'{_res}</div>',
-                        unsafe_allow_html=True)
+                    st.info(_res)
                 except Exception as e:
                     st.error(f"Errore AI: {e}")
 
@@ -1214,13 +1203,13 @@ def build_map3d_html(encoded_polyline, mapbox_token, sport_type="", elev_gain=0,
     <div style="display:flex;align-items:center;gap:7px"><div style="width:11px;height:11px;border-radius:50%;background:#FFEB3B;flex-shrink:0"></div>25-30° attenzione</div>
     <div style="display:flex;align-items:center;gap:7px"><div style="width:11px;height:11px;border-radius:50%;background:#FF9800;flex-shrink:0"></div>30-35° rischio</div>
     <div style="display:flex;align-items:center;gap:7px"><div style="width:11px;height:11px;border-radius:50%;background:#F44336;flex-shrink:0"></div>&gt;35° pericolo</div>
-    <div style="color:#666;font-size:12px;margin-top:4px">Soglie AINEVA</div>
+    <div style="color:#666;font-size:10px;margin-top:4px">Soglie AINEVA</div>
   </div>""" if show_slope_map else ""
 
         rotate_hint = "" if compact else """
   <div id="rotate-hint" style="position:absolute;bottom:40px;right:10px;
        background:rgba(14,17,23,0.75);color:#aaa;padding:5px 10px;
-       border-radius:8px;font-size:12px;font-family:sans-serif;z-index:10;line-height:1.7">
+       border-radius:8px;font-size:10px;font-family:sans-serif;z-index:10;line-height:1.7">
     🖱️ <b>Drag</b> pan &nbsp;|&nbsp; <b>Ctrl+drag</b> inclina<br>
     <b>Alt+drag</b> ruota &nbsp;|&nbsp; <b>Scroll</b> zoom
   </div>"""
@@ -1396,28 +1385,19 @@ def parse_ringconn_activity(file) -> pd.DataFrame:
 
 
 def parse_ringconn_zip(zip_file) -> tuple:
-    """
-    Parsa uno ZIP RingConn che contiene i 3 CSV.
-    Ritorna (vitals_df, sleep_df, activity_df) — None se non trovato.
-    """
+    """Parsa ZIP RingConn → (vitals_df, sleep_df, activity_df)"""
     import zipfile, io
-    vitals   = None
-    sleep    = None
-    activity = None
+    vitals = sleep = activity = None
     try:
         with zipfile.ZipFile(zip_file, "r") as zf:
             for name in zf.namelist():
-                name_l = name.lower()
-                data   = zf.read(name)
-                buf    = io.BytesIO(data)
-                if "vital" in name_l:
-                    vitals   = parse_ringconn_vitals(buf)
-                elif "sleep" in name_l:
-                    sleep    = parse_ringconn_sleep(buf)
-                elif "activity" in name_l:
-                    activity = parse_ringconn_activity(buf)
+                nl = name.lower()
+                buf = io.BytesIO(zf.read(name))
+                if "vital" in nl:   vitals   = parse_ringconn_vitals(buf)
+                elif "sleep" in nl: sleep    = parse_ringconn_sleep(buf)
+                elif "activ" in nl: activity = parse_ringconn_activity(buf)
     except Exception as e:
-        raise ValueError(f"Errore lettura ZIP: {e}")
+        raise ValueError(f"Errore ZIP: {e}")
     return vitals, sleep, activity
 
 def calc_readiness(vitals_row, sleep_row, tsb: float) -> dict:
@@ -2189,50 +2169,40 @@ if token_ok:
             st.success(f"✅ {len(st.session_state.rc_vitals)} giorni caricati")
         with st.expander("📂 Carica dati" if not rc_has_data else "🔄 Aggiorna dati"):
             st.caption("Esporta dall'app RingConn: Profilo → Impostazioni → Data Export")
-            # ── Modalità ZIP (preferita) ──
-            f_zip = st.file_uploader("📦 ZIP RingConn (tutti e 3 i file)", type="zip", key="up_zip")
+            f_zip = st.file_uploader("📦 ZIP RingConn (tutti i file)", type="zip", key="up_zip")
             if f_zip:
                 try:
                     _v, _s, _a = parse_ringconn_zip(f_zip)
-                    if _v is not None:
-                        st.session_state.rc_vitals   = _v
-                    if _s is not None:
-                        st.session_state.rc_sleep    = _s
-                    if _a is not None:
-                        st.session_state.rc_activity = _a
+                    if _v is not None: st.session_state.rc_vitals   = _v
+                    if _s is not None: st.session_state.rc_sleep    = _s
+                    if _a is not None: st.session_state.rc_activity = _a
                     _loaded = [k for k,v in [("Vital Signs",_v),("Sleep",_s),("Activity",_a)] if v is not None]
                     st.success(f"✅ Caricati: {', '.join(_loaded)}")
                     st.rerun()
                 except Exception as e:
                     st.error(f"Errore ZIP: {e}")
-            # ── Modalità CSV singoli (fallback) ──
-            with st.expander("📄 Oppure carica CSV singoli"):
-                f_vitals   = st.file_uploader("Vital_Signs CSV",  type="csv", key="up_vitals")
-                f_sleep    = st.file_uploader("Sleep CSV",         type="csv", key="up_sleep")
-                f_activity = st.file_uploader("Activity CSV",      type="csv", key="up_activity")
+            with st.expander("📄 Oppure CSV singoli"):
+                f_vitals   = st.file_uploader("Vital_Signs CSV", type="csv", key="up_vitals")
+                f_sleep    = st.file_uploader("Sleep CSV",        type="csv", key="up_sleep")
+                f_activity = st.file_uploader("Activity CSV",     type="csv", key="up_activity")
                 if f_vitals:
                     try:
                         st.session_state.rc_vitals = parse_ringconn_vitals(f_vitals)
                         st.success(f"✅ Vital Signs: {len(st.session_state.rc_vitals)} giorni")
-                    except Exception as e:
-                        st.error(f"Errore: {e}")
+                    except Exception as e: st.error(f"Errore: {e}")
                 if f_sleep:
                     try:
                         st.session_state.rc_sleep = parse_ringconn_sleep(f_sleep)
                         st.success(f"✅ Sleep: {len(st.session_state.rc_sleep)} sessioni")
-                    except Exception as e:
-                        st.error(f"Errore: {e}")
+                    except Exception as e: st.error(f"Errore: {e}")
                 if f_activity:
                     try:
                         st.session_state.rc_activity = parse_ringconn_activity(f_activity)
                         st.success(f"✅ Activity: {len(st.session_state.rc_activity)} giorni")
-                    except Exception as e:
-                        st.error(f"Errore: {e}")
+                    except Exception as e: st.error(f"Errore: {e}")
             if any(st.session_state.get(k) is not None for k in ["rc_vitals","rc_sleep","rc_activity"]):
                 if st.button("🗑️ Rimuovi dati RingConn", use_container_width=True):
-                    st.session_state.rc_vitals   = None
-                    st.session_state.rc_sleep    = None
-                    st.session_state.rc_activity = None
+                    st.session_state.rc_vitals = st.session_state.rc_sleep = st.session_state.rc_activity = None
                     st.rerun()
 
         st.divider()
@@ -2429,7 +2399,7 @@ if token_ok:
                         display:flex;align-items:center;gap:16px">
                 <div style="text-align:center;min-width:55px">
                     <div style="font-size:26px;font-weight:900;color:{b['color']}">{b['budget']}</div>
-                    <div style="font-size:12px;color:#888">TSS budget</div>
+                    <div style="font-size:10px;color:#888">TSS budget</div>
                 </div>
                 <div style="flex:1">
                     <div style="font-size:13px;font-weight:700;color:{b['color']}">{b['zone']}</div>
@@ -2492,19 +2462,19 @@ if token_ok:
                         <div style="display:flex;gap:16px;flex-wrap:wrap">
                             <div style="text-align:center">
                                 <div style="font-size:16px;font-weight:700;color:#111">{km:.1f}</div>
-                                <div style="font-size:12px;color:#555">km</div>
+                                <div style="font-size:10px;color:#555">km</div>
                             </div>
                             <div style="text-align:center">
                                 <div style="font-size:16px;font-weight:700;color:#111">{int(ore)}h {int((ore%1)*60)}m</div>
-                                <div style="font-size:12px;color:#555">durata</div>
+                                <div style="font-size:10px;color:#555">durata</div>
                             </div>
                             <div style="text-align:center">
                                 <div style="font-size:16px;font-weight:700;color:#111">{tss_sp:.0f}</div>
-                                <div style="font-size:12px;color:#555">TSS</div>
+                                <div style="font-size:10px;color:#555">TSS</div>
                             </div>
                             <div style="text-align:center">
                                 <div style="font-size:16px;font-weight:700;color:#111">{elev_sp:.0f}</div>
-                                <div style="font-size:12px;color:#555">↑ m</div>
+                                <div style="font-size:10px;color:#555">↑ m</div>
                             </div>
                         </div>
                         <div>{dkm_str}</div>
@@ -2632,11 +2602,7 @@ if token_ok:
                     _act_id = str(row.get("id", row["start_date"]))
                     _cache_key = f"ai_analysis_{_act_id}"
                     if _cache_key in st.session_state:
-                        st.markdown(
-                            f'<div style="background:#f8f9fa;border:1px solid #dee2e6;border-left:4px solid {s["color"]};'
-                            f'border-radius:8px;padding:14px 18px;color:#212529;font-size:14px;line-height:1.7">'
-                            f'{st.session_state[_cache_key]}</div>',
-                            unsafe_allow_html=True)
+                        st.info(st.session_state[_cache_key])
                     else:
                         with st.spinner("Il coach sta analizzando..."):
                             try:
@@ -2657,11 +2623,7 @@ if token_ok:
                                 )
                                 _result = ai_generate(f"{_ctx}\n\n{_prompt}")
                                 st.session_state[_cache_key] = _result
-                                st.markdown(
-                                    f'<div style="background:#f8f9fa;border:1px solid #dee2e6;border-left:4px solid {s["color"]};'
-                                    f'border-radius:8px;padding:14px 18px;color:#212529;font-size:14px;line-height:1.7">'
-                                    f'{_result}</div>',
-                                    unsafe_allow_html=True)
+                                st.info(_result)
                             except Exception as e:
                                 st.error(f"Errore AI: {e}")
 
@@ -2706,7 +2668,7 @@ if token_ok:
         rc_s = st.session_state.rc_sleep
 
         if rc_v is None and rc_s is None:
-            st.info("Nessun dato RingConn caricato. Usa il pannello **💍 RingConn** nella sidebar — puoi caricare direttamente lo **ZIP** esportato dall'app.")
+            st.info("Nessun dato RingConn caricato. Usa il pannello **💍 RingConn** nella sidebar per caricare i tuoi CSV.")
             st.markdown("""
             **Come esportare i dati da RingConn:**
             1. Apri l'app RingConn sul telefono
@@ -2756,8 +2718,8 @@ if token_ok:
         st.divider()
 
         # ── Tabs principali ──
-        tab_hrv, tab_sleep, tab_steps, tab_corr, tab_ai = st.tabs([
-            "❤️ HRV & Vitali", "💤 Sonno", "👟 Passi & Attività", "🔗 Correlazione Performance", "🤖 Analisi AI"
+        tab_hrv, tab_sleep, tab_steps, tab_corr = st.tabs([
+            "❤️ HRV & Vitali", "💤 Sonno", "👟 Passi & Attività", "🔗 Correlazione Performance"
         ])
 
         # ────────────────────────────────────────────
@@ -2776,51 +2738,57 @@ if token_ok:
                 k3.metric("FC riposo media", f"{rc_v['hr_avg'].dropna().mean():.0f} bpm")
                 k4.metric("SpO2 media", f"{rc_v['spo2_avg'].dropna().mean():.0f}%")
 
-                # Grafico HRV + banda baseline + TSB sovrapposto
-                st.markdown("##### HRV giornaliero vs TSB")
+                # HRV + TSB — ultimi 14gg, dual-line pulito
+                st.markdown("##### HRV giornaliero vs TSB — ultimi 14 giorni")
+                _rc14 = rc_v_valid.tail(14)
+                _tsb14 = tsb_daily.reindex(_rc14["date"]).ffill()
                 fig_hrv = make_subplots(specs=[[{"secondary_y": True}]])
-
+                # Banda min-max HRV
                 fig_hrv.add_trace(go.Scatter(
-                    x=rc_v_valid["date"], y=rc_v_valid["hrv_avg"],
-                    name="HRV medio", line=dict(color="#e94560", width=2),
-                    mode="lines+markers", marker=dict(size=5),
+                    x=_rc14["date"], y=_rc14["hrv_max"],
+                    mode="lines", line=dict(width=0), showlegend=False,
                 ), secondary_y=False)
                 fig_hrv.add_trace(go.Scatter(
-                    x=rc_v_valid["date"], y=rc_v_valid["hrv_max"],
-                    name="HRV max", line=dict(color="#e94560", width=1, dash="dot"),
-                    opacity=0.4, mode="lines",
+                    x=_rc14["date"], y=_rc14["hrv_min"],
+                    mode="lines", line=dict(width=0),
+                    fill="tonexty", fillcolor="rgba(233,69,96,0.12)",
+                    name="Range HRV",
                 ), secondary_y=False)
+                # Linea HRV medio
                 fig_hrv.add_trace(go.Scatter(
-                    x=rc_v_valid["date"], y=rc_v_valid["hrv_min"],
-                    name="HRV min", line=dict(color="#e94560", width=1, dash="dot"),
-                    fill="tonexty", fillcolor="rgba(233,69,96,0.08)",
-                    opacity=0.4, mode="lines",
+                    x=_rc14["date"], y=_rc14["hrv_avg"],
+                    name="HRV medio", line=dict(color="#e94560", width=2.5),
+                    mode="lines+markers", marker=dict(size=7, color="#e94560",
+                        line=dict(color="#fff", width=1.5)),
                 ), secondary_y=False)
                 # Linea baseline
                 fig_hrv.add_hline(y=hrv_baseline_val, line_dash="dash",
-                                   line_color="rgba(233,69,96,0.5)",
-                                   annotation_text=f"Baseline {hrv_baseline_val:.0f}ms",
-                                   annotation_position="top left")
-
-                # TSB sovrapposto (asse secondario)
-                tsb_rc = tsb_daily.reindex(rc_v_valid["date"]).fillna(method="ffill")
+                    line_color="rgba(233,69,96,0.45)",
+                    annotation_text=f"Baseline {hrv_baseline_val:.0f}ms",
+                    annotation_font_color="#e94560", annotation_position="top left")
+                # TSB asse secondario
                 fig_hrv.add_trace(go.Scatter(
-                    x=rc_v_valid["date"], y=tsb_rc.values,
-                    name="TSB", line=dict(color="#2196F3", width=1.5, dash="dot"),
-                    opacity=0.7, mode="lines",
+                    x=_rc14["date"], y=_tsb14.values,
+                    name="TSB", line=dict(color="#2196F3", width=2, dash="dot"),
+                    mode="lines+markers", marker=dict(size=5),
                 ), secondary_y=True)
-
+                fig_hrv.add_trace(go.Scatter(
+                    x=[_rc14["date"].min(), _rc14["date"].max()], y=[0, 0],
+                    mode="lines", line=dict(color="rgba(33,150,243,0.25)", width=1),
+                    showlegend=False,
+                ), secondary_y=True)
                 fig_hrv.update_layout(
                     paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-                    height=280, margin=dict(l=0,r=0,t=10,b=0),
-                    legend=dict(orientation="h", y=1.1, font=dict(size=11)),
-                    xaxis=dict(gridcolor="rgba(255,255,255,0.05)"),
+                    height=300, margin=dict(l=0,r=0,t=10,b=0),
+                    legend=dict(orientation="h", y=1.12, font=dict(size=12)),
+                    xaxis=dict(gridcolor="rgba(255,255,255,0.05)", tickformat="%d/%m"),
                 )
                 fig_hrv.update_yaxes(title_text="HRV (ms)", secondary_y=False,
-                                      gridcolor="rgba(255,255,255,0.05)")
-                fig_hrv.update_yaxes(title_text="TSB", secondary_y=True,
-                                      gridcolor="rgba(255,255,255,0.0)")
+                    gridcolor="rgba(255,255,255,0.05)", title_font=dict(color="#e94560"))
+                fig_hrv.update_yaxes(title_text="TSB (forma)", secondary_y=True,
+                    gridcolor="rgba(0,0,0,0)", title_font=dict(color="#2196F3"))
                 st.plotly_chart(fig_hrv, use_container_width=True)
+                st.caption("HRV alto + TSB positivo = giornata ideale per allenamento intenso · HRV basso + TSB negativo = recupero prioritario")
 
                 # FC riposo + SpO2
                 col_fc, col_spo2 = st.columns(2)
@@ -2841,24 +2809,35 @@ if token_ok:
                     st.plotly_chart(fig_fc, use_container_width=True)
 
                 with col_spo2:
-                    st.markdown("##### SpO2 media")
-                    rc_sp = rc_v.dropna(subset=["spo2_avg"])
-                    colors_spo2 = ["#F44336" if v < 95 else "#4CAF50" for v in rc_sp["spo2_avg"]]
-                    fig_sp = go.Figure(go.Bar(
+                    st.markdown("##### SpO2 media — ultimi 30gg")
+                    rc_sp = rc_v.dropna(subset=["spo2_avg"]).tail(30)
+                    fig_sp = go.Figure()
+                    # Zone colorate
+                    fig_sp.add_hrect(y0=95, y1=101, fillcolor="rgba(76,175,80,0.07)", line_width=0)
+                    fig_sp.add_hrect(y0=92, y1=95,  fillcolor="rgba(255,152,0,0.07)",  line_width=0)
+                    fig_sp.add_hrect(y0=88, y1=92,  fillcolor="rgba(244,67,54,0.07)",  line_width=0)
+                    # Linea principale
+                    fig_sp.add_trace(go.Scatter(
                         x=rc_sp["date"], y=rc_sp["spo2_avg"],
-                        marker_color=colors_spo2, opacity=0.85,
+                        mode="lines+markers",
+                        line=dict(color="#7B1FA2", width=2),
+                        marker=dict(size=6,
+                            color=["#F44336" if v < 95 else "#4CAF50" for v in rc_sp["spo2_avg"]],
+                            line=dict(color="#fff", width=1)),
+                        name="SpO2",
                     ))
-                    fig_sp.add_hline(y=95, line_dash="dash",
-                                     line_color="rgba(244,67,54,0.5)",
-                                     annotation_text="Min. ottimale 95%",
-                                     annotation_position="top left")
+                    fig_sp.add_hline(y=95, line_dash="dash", line_color="rgba(244,67,54,0.5)",
+                                     annotation_text="95%", annotation_position="top right")
+                    _below95 = int((rc_sp["spo2_avg"] < 95).sum())
                     fig_sp.update_layout(
                         paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-                        height=200, margin=dict(l=0,r=0,t=10,b=0),
-                        xaxis=dict(gridcolor="rgba(255,255,255,0.05)"),
+                        height=200, margin=dict(l=0,r=0,t=10,b=0), showlegend=False,
+                        xaxis=dict(gridcolor="rgba(255,255,255,0.05)", tickformat="%d/%m"),
                         yaxis=dict(gridcolor="rgba(255,255,255,0.05)", title="%", range=[88,101]),
                     )
                     st.plotly_chart(fig_sp, use_container_width=True)
+                    if _below95 > 0:
+                        st.caption(f"⚠️ {_below95} giorni con SpO2 < 95% negli ultimi 30gg")
 
         # ────────────────────────────────────────────
         # TAB SONNO
@@ -2879,75 +2858,100 @@ if token_ok:
                 s4.metric("Deep medio",     f"{avg_deep_s:.0f}%")
                 s5.metric("Veglia media",   f"{avg_awk_s:.0f} min")
 
-                # Grafico fasi sonno stacked
-                st.markdown("##### Fasi del sonno per sessione")
+                # ── Fasi del sonno — ultimi 14gg stacked orizzontale ──
+                st.markdown("##### Fasi del sonno — ultimi 14 notti")
+                _rc_s14 = rc_s.dropna(subset=["total_min"]).tail(14).copy()
+                _rc_s14["label"] = _rc_s14["date"].dt.strftime("%d/%m")
                 fig_stages = go.Figure()
                 fig_stages.add_trace(go.Bar(
-                    name="Deep 🔵", x=rc_s["date"], y=rc_s["deep_min"],
-                    marker_color="#1565C0", opacity=0.9,
+                    name="Deep 🔵", y=_rc_s14["label"], x=_rc_s14["deep_min"],
+                    orientation="h", marker_color="#1565C0",
+                    text=_rc_s14["deep_min"].apply(lambda v: f"{int(v)}m"),
+                    textposition="inside", insidetextanchor="middle",
                 ))
                 fig_stages.add_trace(go.Bar(
-                    name="REM 🟣", x=rc_s["date"], y=rc_s["rem_min"],
-                    marker_color="#7B1FA2", opacity=0.85,
+                    name="REM 🟣", y=_rc_s14["label"], x=_rc_s14["rem_min"],
+                    orientation="h", marker_color="#7B1FA2",
+                    text=_rc_s14["rem_min"].apply(lambda v: f"{int(v)}m"),
+                    textposition="inside", insidetextanchor="middle",
                 ))
                 fig_stages.add_trace(go.Bar(
-                    name="Light 🩵", x=rc_s["date"], y=rc_s["light_min"],
-                    marker_color="#42A5F5", opacity=0.7,
+                    name="Light 🩵", y=_rc_s14["label"], x=_rc_s14["light_min"],
+                    orientation="h", marker_color="#42A5F5", opacity=0.8,
                 ))
                 fig_stages.add_trace(go.Bar(
-                    name="Veglia ⬜", x=rc_s["date"], y=rc_s["awake_min"],
-                    marker_color="rgba(200,200,200,0.3)",
-                ))
-                # Linea ore totali
-                fig_stages.add_trace(go.Scatter(
-                    name="Tot. min", x=rc_s["date"], y=rc_s["total_min"],
-                    mode="lines+markers", line=dict(color="#FF9800", width=2),
-                    yaxis="y",
+                    name="Veglia", y=_rc_s14["label"], x=_rc_s14["awake_min"],
+                    orientation="h", marker_color="rgba(180,180,180,0.35)",
                 ))
                 fig_stages.update_layout(
                     paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-                    barmode="stack", height=300, margin=dict(l=0,r=0,t=10,b=0),
-                    legend=dict(orientation="h", y=1.1, font=dict(size=11)),
-                    xaxis=dict(gridcolor="rgba(255,255,255,0.05)"),
-                    yaxis=dict(gridcolor="rgba(255,255,255,0.05)", title="minuti"),
+                    barmode="stack", height=max(280, len(_rc_s14)*22+60),
+                    margin=dict(l=10,r=10,t=10,b=0),
+                    legend=dict(orientation="h", y=1.05, font=dict(size=12)),
+                    xaxis=dict(gridcolor="rgba(255,255,255,0.05)", title="minuti"),
+                    yaxis=dict(gridcolor="rgba(255,255,255,0.0)", autorange="reversed"),
+                    font=dict(size=12),
                 )
                 st.plotly_chart(fig_stages, use_container_width=True)
 
-                # Efficienza + ora addormentamento
+                # ── Efficienza + distribuzione ora sonno ──
                 col_eff, col_time = st.columns(2)
                 with col_eff:
-                    st.markdown("##### Efficienza sonno %")
+                    st.markdown("##### Efficienza sonno — ultimi 14gg")
+                    _eff14 = rc_s.dropna(subset=["efficiency_pct"]).tail(14)
                     eff_colors = ["#4CAF50" if v >= 85 else "#FF9800" if v >= 75 else "#F44336"
-                                  for v in rc_s["efficiency_pct"].fillna(80)]
+                                  for v in _eff14["efficiency_pct"]]
                     fig_eff = go.Figure(go.Bar(
-                        x=rc_s["date"], y=rc_s["efficiency_pct"],
+                        x=_eff14["date"], y=_eff14["efficiency_pct"],
                         marker_color=eff_colors, opacity=0.85,
+                        text=[f"{v:.0f}%" for v in _eff14["efficiency_pct"]],
+                        textposition="outside",
                     ))
                     fig_eff.add_hline(y=85, line_dash="dash",
                                       line_color="rgba(76,175,80,0.5)",
-                                      annotation_text="Ottimale 85%")
+                                      annotation_text="85% ottimale")
                     fig_eff.update_layout(
                         paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-                        height=220, margin=dict(l=0,r=0,t=10,b=0),
-                        xaxis=dict(gridcolor="rgba(255,255,255,0.05)"),
-                        yaxis=dict(gridcolor="rgba(255,255,255,0.05)", title="%"),
+                        height=220, margin=dict(l=0,r=0,t=20,b=0),
+                        xaxis=dict(gridcolor="rgba(255,255,255,0.05)", tickformat="%d/%m"),
+                        yaxis=dict(gridcolor="rgba(255,255,255,0.05)", title="%", range=[0,105]),
                     )
                     st.plotly_chart(fig_eff, use_container_width=True)
 
                 with col_time:
-                    st.markdown("##### Distribuzione ora inizio sonno")
-                    sleep_hour = rc_s["start_time"].dropna().dt.hour + rc_s["start_time"].dropna().dt.minute/60
-                    fig_sh = go.Figure(go.Histogram(
-                        x=sleep_hour, nbinsx=12,
-                        marker_color="#7B1FA2", opacity=0.8,
+                    st.markdown("##### Quando vai a dormire?")
+                    _sh = rc_s["start_time"].dropna()
+                    _hr = _sh.dt.hour + _sh.dt.minute / 60
+                    # Fasce orarie
+                    _bands = [("< 22h", "#4CAF50", 0, 22),
+                               ("22–23h", "#8BC34A", 22, 23),
+                               ("23–0h",  "#FF9800", 23, 24),
+                               ("0–1h",   "#FF5722", 24, 25),
+                               ("> 1h",   "#F44336", 25, 30)]
+                    _hr_adj = _hr.apply(lambda h: h + 24 if h < 4 else h)
+                    _counts = {b[0]: int((_hr_adj >= b[2]) & (_hr_adj < b[3])).sum()
+                                for b in _bands}
+                    _counts = {b[0]: int(((_hr_adj >= b[2]) & (_hr_adj < b[3])).sum())
+                                for b in _bands}
+                    _tot = max(sum(_counts.values()), 1)
+                    _pct = {k: v/_tot*100 for k,v in _counts.items()}
+                    fig_sh = go.Figure(go.Bar(
+                        x=list(_pct.keys()),
+                        y=list(_pct.values()),
+                        marker_color=[b[1] for b in _bands],
+                        text=[f"{v:.0f}%" for v in _pct.values()],
+                        textposition="outside",
                     ))
                     fig_sh.update_layout(
                         paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-                        height=220, margin=dict(l=0,r=0,t=10,b=0),
-                        xaxis=dict(gridcolor="rgba(255,255,255,0.05)", title="Ora"),
-                        yaxis=dict(gridcolor="rgba(255,255,255,0.05)", title="notti"),
+                        height=220, margin=dict(l=0,r=0,t=20,b=0),
+                        xaxis=dict(gridcolor="rgba(255,255,255,0.05)", title="Fascia oraria"),
+                        yaxis=dict(gridcolor="rgba(255,255,255,0.05)", title="%", range=[0,100]),
+                        showlegend=False,
                     )
                     st.plotly_chart(fig_sh, use_container_width=True)
+                    _best = max(_pct, key=_pct.get)
+                    st.caption(f"Fascia più frequente: **{_best}** ({_pct[_best]:.0f}% delle notti) · Target ideale: 22–23h")
 
         # ────────────────────────────────────────────
         # TAB PASSI & ATTIVITÀ GIORNALIERA
@@ -3079,137 +3083,121 @@ if token_ok:
         # ────────────────────────────────────────────
         with tab_corr:
             if rc_s is None or rc_s.empty:
-                st.info("Carica il file Sleep CSV per vedere le correlazioni.")
+                st.info("Carica il file Sleep CSV (o il ZIP) per vedere le correlazioni.")
             else:
-                st.markdown("##### 📊 Come il sonno influenza le tue prestazioni")
-                st.caption("Ogni punto = un allenamento, colorato per tipo. Il sonno considerato è quello della notte precedente.")
+                st.markdown("##### 🔗 Correlazione Sonno → Performance")
+                st.caption("Analisi basata su allenamenti il giorno successivo alla sessione di sonno.")
 
-                # Unisci sonno del giorno-1 con attività del giorno dopo
                 df_corr = df[df["distance"] > 1000].copy()
                 df_corr["date_key"] = df_corr["start_date"].dt.normalize()
                 rc_s_key = rc_s.copy()
                 rc_s_key["next_day"] = rc_s_key["date"] + pd.Timedelta(days=1)
-
                 merged = df_corr.merge(
-                    rc_s_key[["next_day","total_hours","efficiency_pct","deep_pct","rem_pct","total_min"]],
+                    rc_s_key[["next_day","total_hours","efficiency_pct","deep_pct","rem_pct"]],
                     left_on="date_key", right_on="next_day", how="inner"
                 )
 
                 if merged.empty:
-                    st.info("Non ci sono abbastanza dati sovrapposti tra Strava e Sleep per calcolare correlazioni.")
+                    st.info("Dati sovrapposti insufficienti tra Strava e Sleep.")
                 else:
-                    # Calcola pace in min/km per corse
-                    merged_run = merged[merged["type"].isin(["Run","TrailRun","VirtualRun"])]
-                    merged_run = merged_run[merged_run["distance"] > 3000].copy()
+                    # Aggiunge HRV dello stesso giorno
+                    if rc_v is not None and not rc_v.empty:
+                        merged = merged.merge(rc_v[["date","hrv_avg"]],
+                            left_on="date_key", right_on="date", how="left")
+
+                    def _r_comment(r, flip_sign=False):
+                        """Converte r in interpretazione e colore."""
+                        _r = -r if flip_sign else r
+                        if   _r >  0.5: return "💚 Forte positiva", "#4CAF50"
+                        elif _r >  0.2: return "🟢 Debole positiva", "#8BC34A"
+                        elif _r < -0.5: return "🔴 Forte negativa", "#F44336"
+                        elif _r < -0.2: return "🟠 Debole negativa", "#FF9800"
+                        else:           return "⬜ Nessuna correlazione", "#888"
+
+                    # Coppie (sonno/hrv → performance) da analizzare
+                    pairs = []
+                    perf_metrics = [("tss","TSS allenamento",False),
+                                    ("average_heartrate","FC media",False)]
+                    # Pace per corse
+                    merged_run = merged[merged["type"].isin(["Run","TrailRun"])].copy()
+                    merged_run = merged_run[merged_run["distance"] > 3000]
                     if not merged_run.empty:
-                        merged_run["pace"] = merged_run["moving_time"] / (merged_run["distance"] / 1000)
+                        merged_run["pace"] = merged_run["moving_time"] / (merged_run["distance"]/1000)
+                        perf_metrics.append(("pace","Passo corsa (sec/km)",True))  # flip: basso=meglio
 
-                    def _scatter_trend(df_plot, xcol, ycol, xlabel, ylabel, color_col=None, height=280):
-                        fig = go.Figure()
-                        if color_col:
-                            for _sp in df_plot[color_col].unique():
-                                _sub = df_plot[df_plot[color_col]==_sp]
-                                fig.add_trace(go.Scatter(x=_sub[xcol], y=_sub[ycol], mode="markers",
-                                    name=get_sport_info(_sp)["label"],
-                                    marker=dict(color=get_sport_info(_sp)["color"], size=8, opacity=0.8)))
+                    sleep_metrics = [("total_hours","Ore di sonno"),
+                                     ("efficiency_pct","Efficienza sonno %"),
+                                     ("deep_pct","Deep sleep %")]
+                    if "hrv_avg" in merged.columns:
+                        sleep_metrics.append(("hrv_avg","HRV giornaliero (ms)"))
+
+                    for sm, sl in sleep_metrics:
+                        for pm, pl, flip in perf_metrics:
+                            _df = (merged_run if pm == "pace" else merged)[[sm, pm]].dropna()
+                            if len(_df) < 4:
+                                continue
+                            _r = float(np.corrcoef(_df[sm], _df[pm])[0,1])
+                            _label, _col = _r_comment(_r, flip_sign=flip)
+                            # Suggerimento pratico
+                            _tip = ""
+                            if sm == "total_hours" and pm == "tss" and _r > 0.25:
+                                _tip = "Dormi di più → tendenza ad allenarti di più/meglio"
+                            elif sm == "efficiency_pct" and "heartrate" in pm and _r < -0.2:
+                                _tip = "Sonno efficiente → FC più bassa a parità di sforzo"
+                            elif sm == "hrv_avg" and pm == "pace" and _r < -0.2:
+                                _tip = "HRV alto → passo migliore nelle corse"
+                            elif sm == "deep_pct" and pm == "tss" and _r > 0.2:
+                                _tip = "Più sonno profondo → sessioni più cariche"
+                            pairs.append({
+                                "Indicatore sonno": sl,
+                                "Performance": pl,
+                                "r": round(_r, 2),
+                                "Correlazione": _label,
+                                "N": len(_df),
+                                "_color": _col,
+                                "_tip": _tip,
+                            })
+
+                    if not pairs:
+                        st.info("Dati insufficienti per calcolare le correlazioni.")
+                    else:
+                        # Visualizzazione come card per ogni coppia con r significativo
+                        sig_pairs = [p for p in pairs if abs(p["r"]) > 0.2]
+                        all_pairs = pairs
+
+                        st.markdown("**Correlazioni significative (|r| > 0.2):**")
+                        if sig_pairs:
+                            for p in sig_pairs:
+                                _bar_w = int(abs(p["r"]) * 100)
+                                _bar_c = p["_color"]
+                                _tip_html = f'<div style="font-size:12px;color:#888;margin-top:3px">💡 {p["_tip"]}</div>' if p["_tip"] else ""
+                                st.markdown(f"""
+                                <div style="background:rgba(255,255,255,0.03);border-left:3px solid {_bar_c};
+                                     border-radius:0 8px 8px 0;padding:10px 14px;margin-bottom:8px">
+                                  <div style="display:flex;justify-content:space-between;align-items:center">
+                                    <span style="color:#ddd;font-size:13px;font-weight:600">
+                                      {p["Indicatore sonno"]} → {p["Performance"]}
+                                    </span>
+                                    <span style="color:{_bar_c};font-size:18px;font-weight:800">r = {p["r"]:+.2f}</span>
+                                  </div>
+                                  <div style="display:flex;align-items:center;gap:8px;margin-top:5px">
+                                    <div style="background:rgba(255,255,255,0.08);border-radius:4px;height:6px;flex:1">
+                                      <div style="background:{_bar_c};height:6px;border-radius:4px;width:{_bar_w}%"></div>
+                                    </div>
+                                    <span style="font-size:12px;color:{_bar_c}">{p["Correlazione"]}</span>
+                                  </div>
+                                  {_tip_html}
+                                </div>""", unsafe_allow_html=True)
                         else:
-                            fig.add_trace(go.Scatter(x=df_plot[xcol], y=df_plot[ycol], mode="markers",
-                                marker=dict(color="#e94560", size=8, opacity=0.8), showlegend=False))
-                        _xy = df_plot[[xcol, ycol]].dropna()
-                        if len(_xy) >= 3:
-                            _c = np.polyfit(_xy[xcol], _xy[ycol], 1)
-                            _xr = np.linspace(_xy[xcol].min(), _xy[xcol].max(), 50)
-                            _r = np.corrcoef(_xy[xcol], _xy[ycol])[0,1]
-                            fig.add_trace(go.Scatter(x=_xr, y=np.polyval(_c,_xr), mode="lines",
-                                line=dict(color="rgba(255,255,255,0.5)", width=2, dash="dot"),
-                                name=f"Trend (r={_r:.2f})"))
-                        fig.update_layout(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-                            height=height, margin=dict(l=0,r=0,t=10,b=0),
-                            legend=dict(font=dict(size=10)),
-                            xaxis=dict(title=xlabel, gridcolor="rgba(255,255,255,0.05)"),
-                            yaxis=dict(title=ylabel, gridcolor="rgba(255,255,255,0.05)"))
-                        return fig
+                            st.info("Nessuna correlazione significativa rilevata — servono più dati.")
 
-                    col_s1c, col_s2c = st.columns(2)
-                    with col_s1c:
-                        st.markdown("**Ore sonno → TSS allenamento**")
-                        if not merged.empty:
-                            st.plotly_chart(_scatter_trend(merged, "total_hours", "tss",
-                                "Ore sonno notte prec.", "TSS allenamento", color_col="type"), use_container_width=True)
-                    with col_s2c:
-                        st.markdown("**Efficienza sonno → FC media allenamento**")
-                        merged_fc = merged.dropna(subset=["average_heartrate"])
-                        if not merged_fc.empty:
-                            st.plotly_chart(_scatter_trend(merged_fc, "efficiency_pct", "average_heartrate",
-                                "Efficienza sonno %", "FC media (bpm)", color_col="type"), use_container_width=True)
+                        with st.expander("📋 Tabella completa correlazioni"):
+                            df_tab = pd.DataFrame([{k:v for k,v in p.items() if not k.startswith("_")}
+                                                    for p in all_pairs])
+                            st.dataframe(df_tab, use_container_width=True, hide_index=True)
+                        st.caption("r = coefficiente di Pearson. Valori: |r|>0.5 = forte, 0.2–0.5 = debole, <0.2 = trascurabile. N = campioni. Correlazione ≠ causalità.")
 
-                    # Correlazione HRV → pace corsa
-                    if rc_v is not None and not merged_run.empty:
-                        df_corr_hrv = df_corr.merge(
-                            rc_v[["date","hrv_avg"]],
-                            left_on="date_key", right_on="date", how="inner"
-                        )
-                        df_corr_hrv_run = df_corr_hrv[df_corr_hrv["type"].isin(["Run","TrailRun"])].copy()
-                        df_corr_hrv_run = df_corr_hrv_run[df_corr_hrv_run["distance"] > 3000]
-                        df_corr_hrv_run["pace"] = df_corr_hrv_run["moving_time"] / (df_corr_hrv_run["distance"]/1000)
 
-                        if not df_corr_hrv_run.empty:
-                            st.markdown("**HRV notturno → Passo medio corsa (giorno stesso)**")
-                            st.caption("HRV alto = migliore recupero → tendenzialmente passo migliore")
-                            st.plotly_chart(_scatter_trend(df_corr_hrv_run, "hrv_avg", "pace",
-                                "HRV (ms)", "Passo (sec/km, meno=meglio)"), use_container_width=True)
-
-                    # Tabella correlazioni numeriche
-                    st.markdown("##### 📋 Coefficienti di correlazione")
-                    corr_data = []
-                    for metric_sleep, label_sleep in [("total_hours","Ore sonno"),("efficiency_pct","Efficienza %"),
-                                                       ("deep_pct","Deep sleep %"),("rem_pct","REM %")]:
-                        for metric_perf, label_perf in [("tss","TSS"),("average_heartrate","FC media")]:
-                            sub = merged[[metric_sleep, metric_perf]].dropna()
-                            if len(sub) >= 4:
-                                r = sub[metric_sleep].corr(sub[metric_perf])
-                                interp = "Positiva forte" if r > 0.5 else "Positiva" if r > 0.2 else                                          "Negativa forte" if r < -0.5 else "Negativa" if r < -0.2 else "Neutrale"
-                                corr_data.append({"Sonno": label_sleep, "Performance": label_perf,
-                                                   "Correlazione r": round(r, 3), "Interpretazione": interp})
-                    if corr_data:
-                        st.dataframe(pd.DataFrame(corr_data), use_container_width=True, hide_index=True)
-
-        # ────────────────────────────────────────────
-        # TAB ANALISI AI
-        # ────────────────────────────────────────────
-        with tab_ai:
-            st.markdown("##### 🤖 Analisi AI Recupero")
-            if st.button("Genera analisi recupero completa", use_container_width=True, key="btn_ai_recupero"):
-                rc_ctx = get_ringconn_context(rc_v, rc_s, days=14)
-                prompt_rec = f"""Sei un coach sportivo esperto in recupero e fisiologia. Analizza questi dati di recupero dell'atleta.
-
-DATI STRAVA (ultimi 14 giorni):
-- CTL (fitness): {current_ctl:.1f}
-- ATL (fatica): {current_atl:.1f}
-- TSB (forma): {current_tsb:.1f}
-- ACWR: {acwr_val:.2f}
-{rc_ctx}
-
-READINESS SCORE: {readiness["score"]}/100 ({readiness["label"]})
-Breakdown: {readiness["breakdown"]}
-
-Fornisci un'analisi strutturata in 4 punti:
-1. STATO RECUPERO — valutazione HRV e qualità del sonno
-2. RELAZIONE TRAINING-RECUPERO — come il carico sta influenzando il recupero
-3. SEGNALI DI ALLARME — eventuali pattern preoccupanti
-4. RACCOMANDAZIONI — consigli pratici per i prossimi 7 giorni su sonno, intensità e recupero attivo
-
-Rispondi in italiano, tono professionale ma diretto, massimo 300 parole."""
-                with st.spinner("Analisi in corso..."):
-                    try:
-                        result_rec = ai_generate(prompt_rec)
-                        st.markdown(f"""
-                        <div style="background:rgba(33,150,243,0.06);border-left:3px solid #2196F3;
-                                    border-radius:0 12px 12px 0;padding:16px 20px;margin-top:8px">
-                            {result_rec.replace(chr(10), "<br>")}
-                        </div>""", unsafe_allow_html=True)
-                    except Exception as e:
-                        st.error(f"Errore AI: {e}")
 
     elif menu == "💪 Stato Fisico":
         st.markdown("## 💪 Analisi Stato Fisico Attuale")
@@ -3236,6 +3224,29 @@ Rispondi in italiano, tono professionale ma diretto, massimo 300 parole."""
                 ctl_30ago  = ctl_daily.iloc[-30] if len(ctl_daily) >= 30 else ctl_daily.iloc[0]
                 trend_ctl  = "in crescita" if current_ctl > ctl_30ago else "in calo"
                 df_sport_r = df.tail(14)["type"].value_counts().to_dict()
+                # Prepara dati RingConn per contesto AI
+                _rc_ctx_extra = ""
+                if rc_vitals is not None and not rc_vitals.empty:
+                    _rv7 = rc_vitals.tail(7)
+                    _hrv_now  = float(rc_vitals.iloc[-1].get("hrv_avg") or 0)
+                    _hrv_base = float(rc_vitals.tail(30)["hrv_avg"].dropna().mean() or 0)
+                    _spo2_avg = float(_rv7["spo2_avg"].dropna().mean() or 0)
+                    _fc_rest  = float(_rv7["hr_min"].dropna().mean() or 0)
+                    _rc_ctx_extra += (
+                        f" HRV ora={_hrv_now:.0f}ms (baseline 30gg={_hrv_base:.0f}ms, ratio={_hrv_now/_hrv_base:.2f})."
+                        f" SpO2 media 7gg={_spo2_avg:.0f}%."
+                        f" FC riposo media 7gg={_fc_rest:.0f}bpm."
+                    ) if _hrv_base > 0 else ""
+                if rc_sleep is not None and not rc_sleep.empty:
+                    _rs7 = rc_sleep.tail(7)
+                    _s_hrs  = float(_rs7["total_hours"].dropna().mean() or 0)
+                    _s_eff  = float(_rs7["efficiency_pct"].dropna().mean() or 0)
+                    _s_deep = float(_rs7["deep_pct"].dropna().mean() or 0)
+                    _s_rem  = float(_rs7["rem_pct"].dropna().mean() or 0)
+                    _rc_ctx_extra += (
+                        f" Sonno 7gg: media={_s_hrs:.1f}h, efficienza={_s_eff:.0f}%,"
+                        f" deep={_s_deep:.0f}%, REM={_s_rem:.0f}%."
+                    )
                 ctx_quick  = (
                     f"CTL={current_ctl:.1f} ({trend_ctl} rispetto a 30gg fa: {ctl_30ago:.1f}), "
                     f"ATL={current_atl:.1f}, TSB={current_tsb:.1f}, ACWR={acwr_val:.2f}, "
@@ -3243,7 +3254,7 @@ Rispondi in italiano, tono professionale ma diretto, massimo 300 parole."""
                     f"VO2max stimato: {vo2max_val if vo2max_val else 'N/D'} ml/kg/min. "
                     f"Sport ultimi 14gg: {df_sport_r}. "
                     f"Readiness RingConn: {readiness['score']}/100 ({readiness['label']})."
-                    + rc_ai_context
+                    + rc_ai_context + _rc_ctx_extra
                 )
                 prompt_quick = (
                     "Sei un coach sportivo d'élite. In 3-4 frasi dirette e concrete, "
@@ -3281,7 +3292,291 @@ Rispondi in italiano, tono professionale ma diretto, massimo 300 parole."""
 
         st.divider()
 
-        # ── BLOCCO 2: Metriche carico avanzate ──
+
+
+        # ── BLOCCO 3: Intensità, Volume & EF — spostato prima del PMC ──
+        st.markdown("### ❤️ Intensità, Volume & Efficienza Aerobica")
+        col_z, col_vol, col_ef = st.columns(3)
+
+        with col_z:
+            st.markdown("**Zone FC — ultimi 30gg**")
+            metric_tooltip("POL")
+            df30 = df[df["start_date"] >= (df["start_date"].max() - timedelta(days=30))]
+            df30 = df30[df30["zone_num"] > 0]
+            z12, z45, pol = 0, 0, 0
+            if not df30.empty:
+                zone_counts = df30.groupby(["zone_num", "zone_label", "zone_color"]).apply(
+                    lambda x: x["moving_time"].sum() / 3600
+                ).reset_index(name="ore")
+                zone_counts = zone_counts.sort_values("zone_num")
+                fig_z = go.Figure(go.Bar(
+                    x=zone_counts["ore"], y=zone_counts["zone_label"],
+                    orientation="h", marker_color=zone_counts["zone_color"],
+                    text=[f"{v:.1f}h" for v in zone_counts["ore"]], textposition="outside",
+                ))
+                fig_z.update_layout(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                                     height=200, margin=dict(l=0, r=60, t=0, b=0),
+                                     xaxis=dict(gridcolor="rgba(255,255,255,0.05)"),
+                                     showlegend=False)
+                st.plotly_chart(fig_z, use_container_width=True)
+                total_z = zone_counts["ore"].sum()
+                z12 = zone_counts[zone_counts["zone_num"] <= 2]["ore"].sum()
+                z45 = zone_counts[zone_counts["zone_num"] >= 4]["ore"].sum()
+                pol = z12 / total_z * 100 if total_z > 0 else 0
+                pol_color = "#4CAF50" if pol >= 75 else "#FF9800" if pol >= 60 else "#F44336"
+                st.markdown(f"<span style='color:{pol_color};font-weight:700'>Bassa intensità: {pol:.0f}%</span> (target >75%)", unsafe_allow_html=True)
+            else:
+                st.info("Nessun dato FC disponibile")
+
+        with col_vol:
+            st.markdown("**Volume settimanale (km)**")
+            df_weekly = df.copy()
+            df_weekly["week"] = df_weekly["start_date"].dt.to_period("W").dt.start_time
+            weekly_km = df_weekly.groupby("week")["distance"].sum() / 1000
+            weekly_km = weekly_km.tail(12)
+            avg_vol = weekly_km.mean()
+            w_colors = ["#e94560" if v > avg_vol * 1.3 else "#2196F3" for v in weekly_km.values]
+            fig_w = go.Figure(go.Bar(x=weekly_km.index, y=weekly_km.values,
+                                      marker_color=w_colors, opacity=0.85))
+            fig_w.add_hline(y=avg_vol, line_dash="dot", line_color="rgba(255,255,255,0.27)", line_width=1,
+                             annotation_text=f"media {avg_vol:.0f}km", annotation_font_color="#aaa")
+            fig_w.update_layout(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                                  height=200, margin=dict(l=0, r=0, t=0, b=0),
+                                  xaxis=dict(gridcolor="rgba(255,255,255,0.05)", tickformat="%d/%m"),
+                                  yaxis=dict(gridcolor="rgba(255,255,255,0.05)"))
+            st.plotly_chart(fig_w, use_container_width=True)
+
+        with col_ef:
+            st.markdown("**Efficiency Factor — trend**")
+            metric_tooltip("EF")
+            ef_data = df[df["ef"].notna()][["start_date", "ef", "type"]].tail(30)
+            if not ef_data.empty:
+                fig_ef = go.Figure()
+                for sport_type in ef_data["type"].unique():
+                    sub = ef_data[ef_data["type"] == sport_type]
+                    fig_ef.add_trace(go.Scatter(
+                        x=sub["start_date"], y=sub["ef"],
+                        mode="markers+lines",
+                        name=f"{get_sport_info(sport_type)['icon']} {get_sport_info(sport_type)['label']}",
+                        line=dict(color=get_sport_info(sport_type)["color"], width=1.5),
+                        marker=dict(size=6),
+                    ))
+                fig_ef.update_layout(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                                      height=200, margin=dict(l=0, r=0, t=0, b=0),
+                                      legend=dict(font=dict(size=10), orientation="h", y=1.15),
+                                      xaxis=dict(gridcolor="rgba(255,255,255,0.05)"),
+                                      yaxis=dict(gridcolor="rgba(255,255,255,0.05)"))
+                st.plotly_chart(fig_ef, use_container_width=True)
+                ef_trend = ef_data["ef"].iloc[-1] - ef_data["ef"].iloc[0] if len(ef_data) > 1 else 0
+                ef_emoji = "📈" if ef_trend > 0 else "📉"
+                st.markdown(f"{ef_emoji} Trend EF: **{ef_trend:+.4f}** negli ultimi {len(ef_data)} allenamenti")
+            else:
+                st.info("Dati FC non sufficienti per EF")
+
+        st.divider()
+
+        # ── PMC grafico linee (senza barre) ──
+        st.markdown("### 📈 Andamento Fitness — PMC 90 giorni")
+        chart_df = pd.DataFrame({
+            "CTL": ctl_daily, "ATL": atl_daily, "TSB": tsb_daily
+        }).dropna().tail(90)
+        fig_pmc = go.Figure()
+        fig_pmc.add_trace(go.Scatter(x=chart_df.index, y=chart_df["CTL"],
+            name="CTL — Fitness", line=dict(color="#2196F3", width=2.5),
+            fill="tozeroy", fillcolor="rgba(33,150,243,0.07)"))
+        fig_pmc.add_trace(go.Scatter(x=chart_df.index, y=chart_df["ATL"],
+            name="ATL — Fatica", line=dict(color="#FF9800", width=2)))
+        fig_pmc.add_trace(go.Scatter(x=chart_df.index, y=chart_df["TSB"],
+            name="TSB — Forma", line=dict(color="#4CAF50", width=2, dash="dot")))
+        fig_pmc.add_hrect(y0=-10, y1=10, fillcolor="rgba(76,175,80,0.05)", line_width=0)
+        fig_pmc.add_hline(y=0, line_dash="dash", line_color="rgba(255,255,255,0.15)", line_width=1)
+        fig_pmc.update_layout(
+            paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+            height=300, margin=dict(l=0, r=0, t=10, b=0),
+            legend=dict(orientation="h", y=1.08),
+            xaxis=dict(gridcolor="rgba(255,255,255,0.05)"),
+            yaxis=dict(gridcolor="rgba(255,255,255,0.05)"),
+        )
+        st.plotly_chart(fig_pmc, use_container_width=True)
+        st.caption("CTL=Fitness cronico (42gg) · ATL=Fatica acuta (7gg) · TSB=Forma (CTL−ATL) · zona verde = forma ottimale")
+
+        st.divider()
+
+        # ── BLOCCO 5: VO2max + Race Predictor + VI ──
+        st.markdown("### 🔬 Capacità Aerobica & Performance")
+        col_vo2, col_race, col_vi = st.columns(3)
+
+        with col_vo2:
+            st.markdown("**VO2max — Corsa & Bici**")
+            metric_tooltip("VO2MAX")
+
+            def _vo2_card(val, label_method, color_override=None):
+                if val >= 65:   vc, vl = "#9C27B0", "🏆 Élite"
+                elif val >= 55: vc, vl = "#4CAF50", "🥇 Molto Buono"
+                elif val >= 45: vc, vl = "#2196F3", "🥈 Buono"
+                elif val >= 35: vc, vl = "#FF9800", "🥉 Media"
+                else:            vc, vl = "#F44336", "📈 Da Migliorare"
+                if color_override: vc = color_override
+                return f"""<div style="background:{vc}15;border:1px solid {vc}44;border-radius:10px;
+                    padding:10px 14px;margin-bottom:8px;display:flex;align-items:center;gap:12px">
+                    <div style="font-size:32px;font-weight:900;color:{vc};min-width:54px;text-align:center">{val:.0f}</div>
+                    <div>
+                        <div style="font-size:11px;color:#888;font-weight:600">{label_method}</div>
+                        <div style="font-size:13px;color:{vc};font-weight:700">{vl}</div>
+                        <div style="font-size:10px;color:#666">ml/kg/min</div>
+                    </div>
+                </div>"""
+
+            _has_vo2 = False
+            # ── Stima da corsa (Daniels VDOT) ──
+            if vo2max_val:
+                st.markdown(_vo2_card(vo2max_val, "🏃 Corsa — formula Daniels"), unsafe_allow_html=True)
+                _has_vo2 = True
+
+            # ── Stima da bici (FTP → Coggan/Hawley) ──
+            _ftp = u.get("ftp", 0)
+            _peso = u.get("weight", 0)
+            if _ftp > 0 and _peso > 0:
+                _ftp_per_kg = _ftp / _peso
+                _vo2_bike   = round(_ftp_per_kg * 10.8 + 7, 1)
+                st.markdown(_vo2_card(_vo2_bike, "🚴 Bici — FTP/kg × 10.8 + 7", "#2196F3"), unsafe_allow_html=True)
+                _has_vo2 = True
+                st.caption(f"FTP={_ftp}W · Peso={_peso}kg · FTP/kg={_ftp_per_kg:.2f}")
+            elif _ftp > 0:
+                st.caption("⚠️ Imposta il **peso** in Profilo Fisico per la stima da bici")
+
+            if not _has_vo2:
+                st.info("Serve almeno 1 corsa ≥5km per la stima da corsa. Imposta FTP e peso per la stima da bici.")
+
+            st.caption("ℹ️ Garmin usa algoritmo Firstbeat (più accurato). Queste sono stime semplici da usare come trend.")
+
+        with col_race:
+            st.markdown("**🏁 Race Time Predictor**")
+            if race_preds:
+                for dist_label, pred in race_preds.items():
+                    st.markdown(f"""
+                    <div style="display:flex; justify-content:space-between; align-items:center;
+                                 background:rgba(255,255,255,0.03); border-radius:8px;
+                                 padding:8px 12px; margin-bottom:6px;">
+                        <span style="color:#aaa; font-size:14px">🏃 {dist_label}</span>
+                        <span style="color:#e94560; font-weight:700; font-size:15px">{pred['time']}</span>
+                        <span style="color:#666; font-size:12px">{pred['pace']}</span>
+                    </div>
+                    """, unsafe_allow_html=True)
+                st.caption("⚠️ Stime basate su VO2max stimato (formula Daniels VDOT). Usa come riferimento indicativo.")
+            else:
+                st.info("Calcola il VO2max per ottenere le stime.")
+
+        with col_vi:
+            st.markdown("**Variability Index (bici)**")
+            metric_tooltip("VI")
+            vi_data = df[df["vi"].notna()][["start_date", "vi", "name"]].tail(20)
+            if not vi_data.empty:
+                vi_colors = ["#4CAF50" if v <= 1.05 else "#FF9800" if v <= 1.10 else "#F44336"
+                              for v in vi_data["vi"]]
+                fig_vi = go.Figure(go.Bar(
+                    x=vi_data["start_date"], y=vi_data["vi"],
+                    marker_color=vi_colors, opacity=0.85,
+                    text=[f"{v:.3f}" for v in vi_data["vi"]], textposition="outside",
+                ))
+                fig_vi.add_hline(y=1.05, line_dash="dot", line_color="rgba(76,175,80,0.33)")
+                fig_vi.add_hline(y=1.10, line_dash="dot", line_color="rgba(255,152,0,0.33)")
+                fig_vi.update_layout(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                                      height=200, margin=dict(l=0, r=0, t=20, b=0),
+                                      xaxis=dict(gridcolor="rgba(255,255,255,0.05)", tickformat="%d/%m"),
+                                      yaxis=dict(gridcolor="rgba(255,255,255,0.05)", range=[0.95, max(1.25, vi_data["vi"].max()+0.05)]))
+                st.plotly_chart(fig_vi, use_container_width=True)
+                avg_vi = vi_data["vi"].mean()
+                vi_label = "Costante ✅" if avg_vi <= 1.05 else "Variabile ⚠️" if avg_vi <= 1.10 else "Molto variabile 🔴"
+                st.markdown(f"Media VI: **{avg_vi:.3f}** — {vi_label}")
+            else:
+                st.info("Nessuna attività in bici con dati di potenza normalizzata.")
+
+        st.divider()
+
+        # ── BLOCCO 6: AI Analisi completa + Piano 7gg ──
+        st.markdown("### 🤖 Coaching AI Avanzato")
+        col_ai1, col_ai2 = st.columns(2)
+
+        with col_ai1:
+            st.markdown("#### Analisi Fisiolologica Completa")
+            if st.button("🔍 Genera Analisi", key="btn_analisi", use_container_width=True):
+                with st.spinner("Analisi in corso..."):
+                    try:
+                        ctl_30ago = ctl_daily.iloc[-30] if len(ctl_daily) >= 30 else ctl_daily.iloc[0]
+                        trend_ctl = "crescente" if current_ctl > ctl_30ago else "decrescente"
+                        df_sport  = df.tail(20)["type"].value_counts().to_dict()
+                        ctx_fitness = (
+                            f"DATI ATLETA: CTL={current_ctl:.1f} (trend {trend_ctl}), "
+                            f"ATL={current_atl:.1f}, TSB={current_tsb:.1f}. "
+                            f"ACWR={acwr_val:.2f}, Ramp Rate={ramp_rate:+.1f}/settimana. "
+                            f"Monotonia={monotonia:.2f}, Training Strain={strain_val:.0f}. "
+                            f"VO2max stimato={vo2max_val if vo2max_val else 'N/D'} ml/kg/min. "
+                            f"% allenamento bassa intensità (Z1-Z2)={pol:.0f}%. "
+                            f"TRIMP ultimi 7gg={trimp_7:.0f}. "
+                            f"Sport praticati={df_sport}."
+                        )
+                        prompt_fitness = (
+                            "Sei un fisiolo dello sport e coach d'élite. "
+                            "Fornisci un'analisi DETTAGLIATA e PROFESSIONALE dello stato fisico di questo atleta. "
+                            "Struttura la risposta così: "
+                            "1) Stato di forma attuale (interpreta CTL/ATL/TSB/ACWR), "
+                            "2) Rischio overtraining/undertraining (monotonia, strain, ramp rate), "
+                            "3) Qualità dell'allenamento (distribuzione intensità, EF), "
+                            "4) Capacità aerobica (VO2max, implicazioni), "
+                            "5) Raccomandazioni concrete per le prossime 2 settimane. "
+                            "Usa terminologia tecnica. Sii diretto e specifico."
+                        )
+                        result_fit = ai_generate(f"{ctx_fitness}\n\n{prompt_fitness}")
+                        st.session_state["analisi_fisica"] = result_fit
+                    except Exception as e:
+                        st.error(f"Errore AI: {e}")
+            if "analisi_fisica" in st.session_state:
+                st.markdown(f'<div style="background:#f8f9fa;border-left:4px solid #2196F3;border-radius:8px;padding:16px 20px;color:#212529;font-size:14px;line-height:1.7">{st.session_state["analisi_fisica"]}</div>', unsafe_allow_html=True)
+
+        with col_ai2:
+            st.markdown("#### 🗓️ Piano Allenamento — Prossimi 7 giorni")
+            goal = st.selectbox("Obiettivo:", [
+                "Mantenimento forma", "Aumentare il fitness (CTL)",
+                "Recupero / scarico", "Preparazione gara (entro 2 settimane)", "Base aerobica"
+            ], key="goal_select")
+            if st.button("🔄 Genera Piano", use_container_width=True, key="btn_piano"):
+                with st.spinner("Il coach sta pianificando..."):
+                    try:
+                        ctx_plan = (
+                            f"CTL={current_ctl:.1f}, ATL={current_atl:.1f}, TSB={current_tsb:.1f}. "
+                            f"ACWR={acwr_val:.2f}, Ramp Rate={ramp_rate:+.1f}. "
+                            f"Monotonia={monotonia:.2f}, Strain={strain_val:.0f}. "
+                            f"FC max={u['fc_max']}, FTP={u['ftp']}W. "
+                            f"Sport principale: {df['type'].value_counts().index[0]}. "
+                            f"% bassa intensità attuale: {pol:.0f}%. "
+                            f"Obiettivo: {goal}."
+                        )
+                        prompt_plan = (
+                            "Crea un piano di allenamento dettagliato per i prossimi 7 giorni. "
+                            "Per ogni giorno: tipo sessione, durata precisa, intensità (zona FC o %FTP), "
+                            "obiettivo fisiologico, note pratiche. "
+                            "Calibra il carico considerando ACWR e TSB attuali. "
+                            "Se ACWR > 1.3 riduci il volume. Se TSB < -20 inserisci più recupero. "
+                            "Formato: Giorno N — [tipo]: descrizione dettagliata."
+                        )
+                        result_plan = ai_generate(f"{ctx_plan}\n\n{prompt_plan}")
+                        st.session_state["piano_7gg"] = result_plan
+                    except Exception as e:
+                        st.error(f"Errore AI: {e}")
+            if "piano_7gg" in st.session_state:
+                st.markdown(f'<div style="background:#f0fff4;border-left:4px solid #4CAF50;border-radius:8px;padding:16px 20px;color:#1b5e20;font-size:14px;line-height:1.7">{st.session_state["piano_7gg"]}</div>', unsafe_allow_html=True)
+
+    # ============================================================
+    # RECAP
+    # ============================================================
+
+    # ============================================================
+    # METRICHE AVANZATE
+    # ============================================================
+
+        st.divider()
+        # ── ACWR & Rischio Infortuni (riepilogo) ──
         st.markdown("### ⚡ Carico & Rischio Infortuni")
         r2c1, r2c2, r2c3, r2c4 = st.columns(4)
 
@@ -3378,296 +3673,6 @@ Rispondi in italiano, tono professionale ma diretto, massimo 300 parole."""
             st.plotly_chart(fig_acwr, use_container_width=True)
 
         st.divider()
-
-        # ── BLOCCO 3: CTL/ATL/TSB + TSS giornaliero ──
-        st.markdown("### 📈 Andamento PMC — 90 giorni")
-        chart_df = pd.DataFrame({
-            "CTL": ctl_daily, "ATL": atl_daily, "TSB": tsb_daily
-        }).dropna().tail(90)
-
-        fig_pmc = make_subplots(rows=2, cols=1, shared_xaxes=True,
-                            row_heights=[0.65, 0.35], vertical_spacing=0.04,
-                            subplot_titles=["CTL / ATL / TSB", "TSS giornaliero"])
-        fig_pmc.add_trace(go.Scatter(x=chart_df.index, y=chart_df["CTL"],
-                                  name="CTL", line=dict(color="#2196F3", width=2.5),
-                                  fill="tozeroy", fillcolor="rgba(33,150,243,0.07)"), row=1, col=1)
-        fig_pmc.add_trace(go.Scatter(x=chart_df.index, y=chart_df["ATL"],
-                                  name="ATL", line=dict(color="#FF9800", width=2)), row=1, col=1)
-        fig_pmc.add_trace(go.Scatter(x=chart_df.index, y=chart_df["TSB"],
-                                  name="TSB", line=dict(color="#4CAF50", width=2, dash="dot")), row=1, col=1)
-        fig_pmc.add_hrect(y0=-10, y1=10, fillcolor="rgba(76,175,80,0.05)", line_width=0, row=1, col=1)
-        tss_bar = tss_daily.tail(90)
-        bar_colors = ["#e94560" if v > 80 else "#FF9800" if v > 50 else "#4CAF50" for v in tss_bar.values]
-        fig_pmc.add_trace(go.Bar(x=tss_bar.index, y=tss_bar.values,
-                              name="TSS/giorno", marker_color=bar_colors, opacity=0.85), row=2, col=1)
-        fig_pmc.update_layout(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-                           height=420, margin=dict(l=0, r=0, t=30, b=0),
-                           legend=dict(orientation="h", y=1.04),
-                           xaxis2=dict(gridcolor="rgba(255,255,255,0.05)"),
-                           yaxis=dict(gridcolor="rgba(255,255,255,0.05)"),
-                           yaxis2=dict(gridcolor="rgba(255,255,255,0.05)"))
-        st.plotly_chart(fig_pmc, use_container_width=True)
-
-        st.divider()
-
-        # ── BLOCCO 4: Zone FC + Volume + EF ──
-        st.markdown("### ❤️ Intensità, Volume & Efficienza Aerobica")
-        col_z, col_vol, col_ef = st.columns(3)
-
-        with col_z:
-            st.markdown("**Zone FC — ultimi 30gg**")
-            metric_tooltip("POL")
-            df30 = df[df["start_date"] >= (df["start_date"].max() - timedelta(days=30))]
-            df30 = df30[df30["zone_num"] > 0]
-            z12, z45, pol = 0, 0, 0
-            if not df30.empty:
-                zone_counts = df30.groupby(["zone_num", "zone_label", "zone_color"]).apply(
-                    lambda x: x["moving_time"].sum() / 3600
-                ).reset_index(name="ore")
-                zone_counts = zone_counts.sort_values("zone_num")
-                fig_z = go.Figure(go.Bar(
-                    x=zone_counts["ore"], y=zone_counts["zone_label"],
-                    orientation="h", marker_color=zone_counts["zone_color"],
-                    text=[f"{v:.1f}h" for v in zone_counts["ore"]], textposition="outside",
-                ))
-                fig_z.update_layout(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-                                     height=200, margin=dict(l=0, r=60, t=0, b=0),
-                                     xaxis=dict(gridcolor="rgba(255,255,255,0.05)"),
-                                     showlegend=False)
-                st.plotly_chart(fig_z, use_container_width=True)
-                total_z = zone_counts["ore"].sum()
-                z12 = zone_counts[zone_counts["zone_num"] <= 2]["ore"].sum()
-                z45 = zone_counts[zone_counts["zone_num"] >= 4]["ore"].sum()
-                pol = z12 / total_z * 100 if total_z > 0 else 0
-                pol_color = "#4CAF50" if pol >= 75 else "#FF9800" if pol >= 60 else "#F44336"
-                st.markdown(f"<span style='color:{pol_color};font-weight:700'>Bassa intensità: {pol:.0f}%</span> (target >75%)", unsafe_allow_html=True)
-            else:
-                st.info("Nessun dato FC disponibile")
-
-        with col_vol:
-            st.markdown("**Volume settimanale (km)**")
-            df_weekly = df.copy()
-            df_weekly["week"] = df_weekly["start_date"].dt.to_period("W").dt.start_time
-            weekly_km = df_weekly.groupby("week")["distance"].sum() / 1000
-            weekly_km = weekly_km.tail(12)
-            avg_vol = weekly_km.mean()
-            w_colors = ["#e94560" if v > avg_vol * 1.3 else "#2196F3" for v in weekly_km.values]
-            fig_w = go.Figure(go.Bar(x=weekly_km.index, y=weekly_km.values,
-                                      marker_color=w_colors, opacity=0.85))
-            fig_w.add_hline(y=avg_vol, line_dash="dot", line_color="rgba(255,255,255,0.27)", line_width=1,
-                             annotation_text=f"media {avg_vol:.0f}km", annotation_font_color="#aaa")
-            fig_w.update_layout(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-                                  height=200, margin=dict(l=0, r=0, t=0, b=0),
-                                  xaxis=dict(gridcolor="rgba(255,255,255,0.05)", tickformat="%d/%m"),
-                                  yaxis=dict(gridcolor="rgba(255,255,255,0.05)"))
-            st.plotly_chart(fig_w, use_container_width=True)
-
-        with col_ef:
-            st.markdown("**Efficiency Factor — trend**")
-            metric_tooltip("EF")
-            ef_data = df[df["ef"].notna()][["start_date", "ef", "type"]].tail(30)
-            if not ef_data.empty:
-                fig_ef = go.Figure()
-                for sport_type in ef_data["type"].unique():
-                    sub = ef_data[ef_data["type"] == sport_type]
-                    fig_ef.add_trace(go.Scatter(
-                        x=sub["start_date"], y=sub["ef"],
-                        mode="markers+lines",
-                        name=f"{get_sport_info(sport_type)['icon']} {get_sport_info(sport_type)['label']}",
-                        line=dict(color=get_sport_info(sport_type)["color"], width=1.5),
-                        marker=dict(size=6),
-                    ))
-                fig_ef.update_layout(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-                                      height=200, margin=dict(l=0, r=0, t=0, b=0),
-                                      legend=dict(font=dict(size=10), orientation="h", y=1.15),
-                                      xaxis=dict(gridcolor="rgba(255,255,255,0.05)"),
-                                      yaxis=dict(gridcolor="rgba(255,255,255,0.05)"))
-                st.plotly_chart(fig_ef, use_container_width=True)
-                ef_trend = ef_data["ef"].iloc[-1] - ef_data["ef"].iloc[0] if len(ef_data) > 1 else 0
-                ef_emoji = "📈" if ef_trend > 0 else "📉"
-                st.markdown(f"{ef_emoji} Trend EF: **{ef_trend:+.4f}** negli ultimi {len(ef_data)} allenamenti")
-            else:
-                st.info("Dati FC non sufficienti per EF")
-
-        st.divider()
-
-        # ── BLOCCO 5: VO2max + Race Predictor + VI ──
-        st.markdown("### 🔬 Capacità Aerobica & Performance")
-        col_vo2, col_race, col_vi = st.columns(3)
-
-        with col_vo2:
-            st.markdown("**VO2max Stimato**")
-            metric_tooltip("VO2MAX")
-            if vo2max_val:
-                # Colore in base al range
-                if vo2max_val >= 65:   vo2_color, vo2_label = "#9C27B0", "🏆 Élite"
-                elif vo2max_val >= 55: vo2_color, vo2_label = "#4CAF50", "🥇 Molto Buono"
-                elif vo2max_val >= 45: vo2_color, vo2_label = "#2196F3", "🥈 Buono"
-                elif vo2max_val >= 35: vo2_color, vo2_label = "#FF9800", "🥉 Nella Media"
-                else:                   vo2_color, vo2_label = "#F44336", "📈 Da Migliorare"
-                st.markdown(f"""
-                <div style="background:{vo2_color}15; border:1px solid {vo2_color}44;
-                             border-radius:12px; padding:16px; text-align:center;">
-                    <div style="font-size:42px; font-weight:900; color:{vo2_color}">{vo2max_val}</div>
-                    <div style="color:#aaa; font-size:12px">ml/kg/min</div>
-                    <div style="color:{vo2_color}; font-size:14px; font-weight:700; margin-top:4px">{vo2_label}</div>
-                </div>
-                """, unsafe_allow_html=True)
-                # Mini gauge VO2max — mostra solo il semicerchio, il numero è già nel card sopra
-                fig_vo2 = go.Figure(go.Indicator(
-                    mode="gauge",
-                    value=vo2max_val,
-                    gauge={
-                        "axis": {"range": [20, 85]},
-                        "bar":  {"color": vo2_color, "thickness": 0.3},
-                        "steps": [
-                            {"range": [20, 35], "color": "rgba(244,67,54,0.15)"},
-                            {"range": [35, 45], "color": "rgba(255,152,0,0.15)"},
-                            {"range": [45, 55], "color": "rgba(33,150,243,0.15)"},
-                            {"range": [55, 65], "color": "rgba(76,175,80,0.15)"},
-                            {"range": [65, 85], "color": "rgba(156,39,176,0.15)"},
-                        ],
-                    },
-                ))
-                fig_vo2.update_layout(paper_bgcolor="rgba(0,0,0,0)", height=120,
-                                       margin=dict(l=10, r=10, t=10, b=0),
-                                       font={"color": "#ccc"})
-                st.plotly_chart(fig_vo2, use_container_width=True)
-            else:
-                st.info("Servono almeno 1 corsa ≥5km con dati tempo per stimare il VO2max.")
-
-        with col_race:
-            st.markdown("**🏁 Race Time Predictor**")
-            if race_preds:
-                for dist_label, pred in race_preds.items():
-                    st.markdown(f"""
-                    <div style="display:flex; justify-content:space-between; align-items:center;
-                                 background:rgba(255,255,255,0.03); border-radius:8px;
-                                 padding:8px 12px; margin-bottom:6px;">
-                        <span style="color:#aaa; font-size:14px">🏃 {dist_label}</span>
-                        <span style="color:#e94560; font-weight:700; font-size:15px">{pred['time']}</span>
-                        <span style="color:#666; font-size:12px">{pred['pace']}</span>
-                    </div>
-                    """, unsafe_allow_html=True)
-                st.caption("⚠️ Stime basate su VO2max stimato (formula Daniels VDOT). Usa come riferimento indicativo.")
-            else:
-                st.info("Calcola il VO2max per ottenere le stime.")
-
-        with col_vi:
-            st.markdown("**Variability Index (bici)**")
-            metric_tooltip("VI")
-            vi_data = df[df["vi"].notna()][["start_date", "vi", "name"]].tail(20)
-            if not vi_data.empty:
-                vi_colors = ["#4CAF50" if v <= 1.05 else "#FF9800" if v <= 1.10 else "#F44336"
-                              for v in vi_data["vi"]]
-                fig_vi = go.Figure(go.Bar(
-                    x=vi_data["start_date"], y=vi_data["vi"],
-                    marker_color=vi_colors, opacity=0.85,
-                    text=[f"{v:.3f}" for v in vi_data["vi"]], textposition="outside",
-                ))
-                fig_vi.add_hline(y=1.05, line_dash="dot", line_color="rgba(76,175,80,0.33)")
-                fig_vi.add_hline(y=1.10, line_dash="dot", line_color="rgba(255,152,0,0.33)")
-                fig_vi.update_layout(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-                                      height=200, margin=dict(l=0, r=0, t=20, b=0),
-                                      xaxis=dict(gridcolor="rgba(255,255,255,0.05)", tickformat="%d/%m"),
-                                      yaxis=dict(gridcolor="rgba(255,255,255,0.05)", range=[0.95, max(1.25, vi_data["vi"].max()+0.05)]))
-                st.plotly_chart(fig_vi, use_container_width=True)
-                avg_vi = vi_data["vi"].mean()
-                vi_label = "Costante ✅" if avg_vi <= 1.05 else "Variabile ⚠️" if avg_vi <= 1.10 else "Molto variabile 🔴"
-                st.markdown(f"Media VI: **{avg_vi:.3f}** — {vi_label}")
-            else:
-                st.info("Nessuna attività in bici con dati di potenza normalizzata.")
-
-        st.divider()
-
-        # ── BLOCCO 6: AI Analisi completa + Piano 7gg ──
-        st.markdown("### 🤖 Coaching AI Avanzato")
-        col_ai1, col_ai2 = st.columns(2)
-
-        with col_ai1:
-            st.markdown("#### Analisi Fisiolologica Completa")
-            if st.button("🔍 Genera Analisi", key="btn_analisi", use_container_width=True):
-                with st.spinner("Analisi in corso..."):
-                    try:
-                        ctl_30ago = ctl_daily.iloc[-30] if len(ctl_daily) >= 30 else ctl_daily.iloc[0]
-                        trend_ctl = "crescente" if current_ctl > ctl_30ago else "decrescente"
-                        df_sport  = df.tail(20)["type"].value_counts().to_dict()
-                        ctx_fitness = (
-                            f"DATI ATLETA: CTL={current_ctl:.1f} (trend {trend_ctl}), "
-                            f"ATL={current_atl:.1f}, TSB={current_tsb:.1f}. "
-                            f"ACWR={acwr_val:.2f}, Ramp Rate={ramp_rate:+.1f}/settimana. "
-                            f"Monotonia={monotonia:.2f}, Training Strain={strain_val:.0f}. "
-                            f"VO2max stimato={vo2max_val if vo2max_val else 'N/D'} ml/kg/min. "
-                            f"% allenamento bassa intensità (Z1-Z2)={pol:.0f}%. "
-                            f"TRIMP ultimi 7gg={trimp_7:.0f}. "
-                            f"Sport praticati={df_sport}."
-                        )
-                        prompt_fitness = (
-                            "Sei un fisiolo dello sport e coach d'élite. "
-                            "Fornisci un'analisi DETTAGLIATA e PROFESSIONALE dello stato fisico di questo atleta. "
-                            "Struttura la risposta così: "
-                            "1) Stato di forma attuale (interpreta CTL/ATL/TSB/ACWR), "
-                            "2) Rischio overtraining/undertraining (monotonia, strain, ramp rate), "
-                            "3) Qualità dell'allenamento (distribuzione intensità, EF), "
-                            "4) Capacità aerobica (VO2max, implicazioni), "
-                            "5) Raccomandazioni concrete per le prossime 2 settimane. "
-                            "Usa terminologia tecnica. Sii diretto e specifico."
-                        )
-                        result_fit = ai_generate(f"{ctx_fitness}\n\n{prompt_fitness}")
-                        st.session_state["analisi_fisica"] = result_fit
-                    except Exception as e:
-                        st.error(f"Errore AI: {e}")
-            if "analisi_fisica" in st.session_state:
-                st.markdown(
-                    f'<div style="background:#f8f9fa;border:1px solid #dee2e6;border-left:4px solid #2196F3;'
-                    f'border-radius:8px;padding:16px 20px;color:#212529;font-size:14px;line-height:1.7">'
-                    f'{st.session_state["analisi_fisica"]}</div>',
-                    unsafe_allow_html=True)
-
-        with col_ai2:
-            st.markdown("#### 🗓️ Piano Allenamento — Prossimi 7 giorni")
-            goal = st.selectbox("Obiettivo:", [
-                "Mantenimento forma", "Aumentare il fitness (CTL)",
-                "Recupero / scarico", "Preparazione gara (entro 2 settimane)", "Base aerobica"
-            ], key="goal_select")
-            if st.button("🔄 Genera Piano", use_container_width=True, key="btn_piano"):
-                with st.spinner("Il coach sta pianificando..."):
-                    try:
-                        ctx_plan = (
-                            f"CTL={current_ctl:.1f}, ATL={current_atl:.1f}, TSB={current_tsb:.1f}. "
-                            f"ACWR={acwr_val:.2f}, Ramp Rate={ramp_rate:+.1f}. "
-                            f"Monotonia={monotonia:.2f}, Strain={strain_val:.0f}. "
-                            f"FC max={u['fc_max']}, FTP={u['ftp']}W. "
-                            f"Sport principale: {df['type'].value_counts().index[0]}. "
-                            f"% bassa intensità attuale: {pol:.0f}%. "
-                            f"Obiettivo: {goal}."
-                        )
-                        prompt_plan = (
-                            "Crea un piano di allenamento dettagliato per i prossimi 7 giorni. "
-                            "Per ogni giorno: tipo sessione, durata precisa, intensità (zona FC o %FTP), "
-                            "obiettivo fisiologico, note pratiche. "
-                            "Calibra il carico considerando ACWR e TSB attuali. "
-                            "Se ACWR > 1.3 riduci il volume. Se TSB < -20 inserisci più recupero. "
-                            "Formato: Giorno N — [tipo]: descrizione dettagliata."
-                        )
-                        result_plan = ai_generate(f"{ctx_plan}\n\n{prompt_plan}")
-                        st.session_state["piano_7gg"] = result_plan
-                    except Exception as e:
-                        st.error(f"Errore AI: {e}")
-            if "piano_7gg" in st.session_state:
-                st.markdown(
-                    f'<div style="background:#f0fff4;border:1px solid #b2dfdb;border-left:4px solid #4CAF50;'
-                    f'border-radius:8px;padding:16px 20px;color:#1b5e20;font-size:14px;line-height:1.7">'
-                    f'{st.session_state["piano_7gg"]}</div>',
-                    unsafe_allow_html=True)
-
-    # ============================================================
-    # RECAP
-    # ============================================================
-
-    # ============================================================
-    # METRICHE AVANZATE
-    # ============================================================
     elif menu == "🧬 Metriche Avanzate":
         st.markdown("## 🧬 Metriche Avanzate")
 
@@ -4518,7 +4523,7 @@ map.on('load', () => {{
   <div class="legend-av">
     <b>Layers attivi</b>
     {aineva_row}{snow_row}{slope_rows}
-    <div style="margin-top:6px;color:#666;font-size:12px">Pendenza = stima GPS</div>
+    <div style="margin-top:6px;color:#666;font-size:10px">Pendenza = stima GPS</div>
   </div>
   <div id="info-ski">
     <div style="font-weight:700;margin-bottom:4px">{ski_icon} {ski_name}</div>
@@ -4881,7 +4886,7 @@ map.on('draw.delete', updateStats);
                                 <span style="font-size:12px;color:#111">❤️ {_sm['hr_avg']}</span>
                                 <span style="font-size:12px;color:#111">📊 {_sr['tss']:.0f} TSS</span>
                                 <span style="background:{_zc_s}22;color:{_zc_s};border:1px solid {_zc_s}55;
-                                             border-radius:4px;padding:1px 6px;font-size:12px;font-weight:700">{_zl_s}</span>
+                                             border-radius:4px;padding:1px 6px;font-size:10px;font-weight:700">{_zl_s}</span>
                             </div>
                         </div>""", unsafe_allow_html=True)
                     with _sbc:
@@ -4891,7 +4896,7 @@ map.on('draw.delete', updateStats);
                             st.rerun()
             st.divider()
 
-        # ── Filtro sport (solo sport significativi + Altro) ──────
+        # ── Filtro sport (solo primari + Altro) ──────────────────
         _primary_in_df = [s for s in CALENDAR_FILTER_SPORTS if s in df["type"].values]
         _extra_in_df   = [s for s in df["type"].unique() if s not in CALENDAR_FILTER_SPORTS]
         _filter_opts   = _primary_in_df + (["_altro_"] if _extra_in_df else [])
@@ -5066,53 +5071,41 @@ map.on('draw.delete', updateStats);
 
                             _num_col = "#e94560" if _is_tod else "#111" if _in_m else "#bbb"
 
-                            # Cella stile Suunto: numero grande + cerchi colorati proporzionali al TSS
+                            # Cella stile Suunto: numero grande + cerchi proporzionali TSS
                             if _has_act and _in_m:
-                                _day_tss   = float(_dacts["tss"].fillna(0).sum())
-                                _dom_sport = _dacts["type"].value_counts().index[0]
-                                _dom_name  = _dacts.iloc[0].get("name","")
-                                _dom_si    = get_sport_info(_dom_sport, _dom_name)
                                 if _sel:
                                     _bg2, _brd2 = "rgba(233,69,96,0.10)", "2px solid #e94560"
                                 elif _is_tod:
                                     _bg2, _brd2 = "rgba(33,150,243,0.10)", "2px solid #2196F3"
                                 else:
-                                    _bg2  = "transparent"
-                                    _brd2 = "1px solid rgba(0,0,0,0.06)"
+                                    _bg2, _brd2 = "transparent", "1px solid rgba(0,0,0,0.06)"
                                 _circles = ""
                                 for _, _ar in _dacts.head(4).iterrows():
                                     _asi2 = get_sport_info(_ar["type"], _ar.get("name",""))
                                     _tss2 = float(_ar.get("tss") or 0)
                                     _km2  = _ar["distance"] / 1000
                                     _sec2 = _ar["moving_time"]
-                                    _h2   = int(_sec2 // 3600)
-                                    _m2   = int((_sec2 % 3600) // 60)
-                                    _d2   = f"{_h2}h{_m2:02d}" if _h2 > 0 else f"{_m2}m"
-                                    _sz2  = max(14, min(36, int(_tss2 / 5) + 14))
-                                    _circles += (
-                                        f'<div title="{_asi2["label"]} · {_km2:.1f}km · {_d2} · TSS {_tss2:.0f}" '
-                                        f'style="width:{_sz2}px;height:{_sz2}px;border-radius:50%;'
-                                        f'background:{_asi2["color"]};flex-shrink:0"></div>'
-                                    )
+                                    _h2, _m2 = int(_sec2//3600), int((_sec2%3600)//60)
+                                    _d2  = f"{_h2}h{_m2:02d}" if _h2 > 0 else f"{_m2}m"
+                                    _sz2 = max(14, min(36, int(_tss2 / 5) + 14))
+                                    _circles += (f'<div title="{_asi2["label"]} · {_km2:.1f}km · {_d2} · TSS {_tss2:.0f}" '
+                                                 f'style="width:{_sz2}px;height:{_sz2}px;border-radius:50%;'
+                                                 f'background:{_asi2["color"]};flex-shrink:0"></div>')
                                 if len(_dacts) > 4:
                                     _circles += f'<div style="font-size:11px;color:#555;align-self:center">+{len(_dacts)-4}</div>'
                                 st.markdown(
                                     f'<div style="background:{_bg2};border:{_brd2};border-radius:12px;'
                                     f'padding:6px 4px 5px;min-height:76px;pointer-events:none;overflow:hidden">'
-                                    f'<div style="font-size:16px;font-weight:700;color:{_num_col};'
-                                    f'     line-height:1;padding:0 4px 5px">{_day.day}</div>'
-                                    f'<div style="display:flex;flex-wrap:wrap;gap:3px;justify-content:center;'
-                                    f'     align-items:flex-end;padding:0 2px">{_circles}</div>'
-                                    f'</div>',
-                                    unsafe_allow_html=True)
+                                    f'<div style="font-size:16px;font-weight:700;color:{_num_col};line-height:1;padding:0 4px 5px">{_day.day}</div>'
+                                    f'<div style="display:flex;flex-wrap:wrap;gap:3px;justify-content:center;align-items:flex-end;padding:0 2px">{_circles}</div>'
+                                    f'</div>', unsafe_allow_html=True)
                             else:
                                 st.markdown(
                                     f'<div style="background:{_bg};border:{_brd};border-radius:12px;'
                                     f'padding:6px 4px 5px;min-height:76px;pointer-events:none">'
                                     f'<div style="font-size:16px;font-weight:{"700" if _in_m else "400"};'
                                     f'     color:{_num_col};line-height:1;padding:0 4px">{_day.day if _in_m else ""}</div>'
-                                    f'</div>',
-                                    unsafe_allow_html=True)
+                                    f'</div>', unsafe_allow_html=True)
 
                             # Bottone click — solo sui giorni con attività
                             if _has_act and _in_m:
@@ -5335,23 +5328,23 @@ map.on('draw.delete', updateStats);
                     <div style="display:flex;gap:20px;flex-wrap:wrap;align-items:center">
                         <div style="text-align:center">
                             <div style="font-size:17px;font-weight:700;color:#111">{km_s:.1f}</div>
-                            <div style="font-size:12px;color:#555">km</div>
+                            <div style="font-size:10px;color:#555">km</div>
                         </div>
                         <div style="text-align:center">
                             <div style="font-size:17px;font-weight:700;color:#111">{int(ore_s)}h {int((ore_s%1)*60)}m</div>
-                            <div style="font-size:12px;color:#555">durata</div>
+                            <div style="font-size:10px;color:#555">durata</div>
                         </div>
                         <div style="text-align:center">
                             <div style="font-size:17px;font-weight:700;color:#111">{tss_s:.0f}</div>
-                            <div style="font-size:12px;color:#555">TSS</div>
+                            <div style="font-size:10px;color:#555">TSS</div>
                         </div>
                         <div style="text-align:center">
                             <div style="font-size:17px;font-weight:700;color:#111">{int(elev_s)}</div>
-                            <div style="font-size:12px;color:#555">↑ m</div>
+                            <div style="font-size:10px;color:#555">↑ m</div>
                         </div>
                         <div style="text-align:center">
                             <div style="font-size:17px;font-weight:700;color:#111">{fc_s}</div>
-                            <div style="font-size:12px;color:#555">FC avg</div>
+                            <div style="font-size:10px;color:#555">FC avg</div>
                         </div>
                     </div>
                     <div>{dkm_html}</div>
@@ -5396,7 +5389,7 @@ map.on('draw.delete', updateStats);
                 _mi = format_metrics(_tr)
                 _zn, _zc, _zl = get_zone_for_activity(_tr, u["fc_max"])
                 _is_bike = _tr["type"] in ("Ride","VirtualRide","MountainBikeRide")
-                _w_badge = (f" · ⚡{_mi['watts']}" + (" <span style='font-size:11px;color:#FF9800'>est.</span>"
+                _w_badge = (f" · ⚡{_mi['watts']}" + (" <span style='font-size:9px;color:#FF9800'>est.</span>"
                     if not _tr.get("device_watts",False) else "")) if _mi["watts"] != "N/A" else ""
                 _cc, _cb = st.columns([11, 1])
                 with _cc:
@@ -5419,7 +5412,7 @@ map.on('draw.delete', updateStats);
                             <span style="font-size:12px;color:#111">{_w_badge}</span>
                             <span style="font-size:12px;color:#111">📊 {_tr['tss']:.0f} TSS</span>
                             <span style="background:{_zc}22;color:{_zc};border:1px solid {_zc}55;
-                                         border-radius:4px;padding:1px 6px;font-size:12px;font-weight:700">{_zl}</span>
+                                         border-radius:4px;padding:1px 6px;font-size:10px;font-weight:700">{_zl}</span>
                         </div>
                     </div>""", unsafe_allow_html=True)
                 with _cb:
@@ -5887,58 +5880,6 @@ map.on('draw.delete', updateStats);
 
             st.session_state.messages.append({"role": "assistant", "content": res})
 
-        # Costruisci snapshot una volta sola per sessione (o se forzato)
-        if "coach_snapshot" not in st.session_state:
-            with st.spinner("Costruisco il contesto atleta..."):
-                st.session_state.coach_snapshot = build_athlete_snapshot(
-                    df=df, u=u,
-                    current_ctl=current_ctl, current_atl=current_atl,
-                    current_tsb=current_tsb, status_label=status_label,
-                    ctl_daily=ctl_daily, atl_daily=atl_daily, tsb_daily=tsb_daily,
-                    vo2max_val=vo2max_val,
-                    acwr_v2=acwr_v2, hrv_slope=hrv_slope, slr=slr,
-                    circadian=circadian, tss_budget=tss_budget,
-                    readiness=readiness, rc_vitals=rc_vitals, rc_sleep=rc_sleep,
-                )
-
-        _snapshot = st.session_state.coach_snapshot
-
-        # System prompt con snapshot completo
-        _system = (
-            "Sei un coach sportivo d'élite, esperto in fisiologia dell'esercizio, "
-            "pianificazione dell'allenamento e recupero. "
-            "Rispondi in italiano. Sii specifico, pratico e diretto. "
-            "Usa i dati forniti per dare consigli personalizzati e non generici. "
-            "Non ripetere tutti i dati che già conosci — usali per ragionare.\n\n"
-            + _snapshot
-        )
-
-        # Mostra storico messaggi
-        for msg in st.session_state.messages:
-            with st.chat_message(msg["role"]):
-                st.markdown(msg["content"])
-
-        if user_input := st.chat_input("Chiedi al tuo coach..."):
-            st.session_state.messages.append({"role": "user", "content": user_input})
-            with st.chat_message("user"):
-                st.markdown(user_input)
-
-            # Costruisci prompt con intero storico chat (multi-turno)
-            _full_prompt = _system + "\n\n"
-            for msg in st.session_state.messages:
-                _role = "Atleta" if msg["role"] == "user" else "Coach"
-                _full_prompt += f"{_role}: {msg['content']}\n"
-            _full_prompt += "Coach:"
-
-            with st.chat_message("assistant"):
-                with st.spinner(""):
-                    try:
-                        res = ai_generate(_full_prompt)
-                    except Exception as e:
-                        res = f"⚠️ Errore AI: {e}"
-                st.markdown(res)
-
-            st.session_state.messages.append({"role": "assistant", "content": res})
 
     # ============================================================
     # RECORD PERSONALI
@@ -6021,7 +5962,7 @@ map.on('draw.delete', updateStats);
                                 padding:12px 16px;text-align:center;margin-bottom:8px">
                         <div style="font-size:13px;font-weight:700;color:#2196F3">{_label}</div>
                         <div style="font-size:22px;font-weight:900;color:#111;margin:4px 0">{_val}</div>
-                        <div style="font-size:12px;color:#666">{_src}</div>
+                        <div style="font-size:10px;color:#666">{_src}</div>
                     </div>""", unsafe_allow_html=True)
                     if st.button(f"✅ Applica {_val}", key=f"auto_{_key}", use_container_width=True):
                         _ud = dict(st.session_state.user_data)
