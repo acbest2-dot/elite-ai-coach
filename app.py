@@ -141,30 +141,31 @@ st.markdown("""
 <style>
     /* Card attività */
     .activity-card {
-        background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
-        border: 1px solid #0f3460;
+        background: #ffffff;
+        border: 1px solid #e0e0e0;
         border-radius: 16px;
         padding: 20px;
         margin-bottom: 16px;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.07);
     }
     .activity-header {
         font-size: 18px;
         font-weight: 700;
-        color: #e94560;
         margin-bottom: 12px;
     }
     .metric-row {
         display: flex;
-        gap: 16px;
+        gap: 10px;
         flex-wrap: wrap;
     }
     .metric-pill {
-        background: rgba(233,69,96,0.12);
-        border: 1px solid rgba(233,69,96,0.3);
+        background: #f5f5f5;
+        border: 1px solid #e0e0e0;
         border-radius: 20px;
-        padding: 4px 12px;
+        padding: 5px 14px;
         font-size: 13px;
-        color: #ccc;
+        color: #444;
+        font-weight: 500;
     }
     .metric-pill span { color: #e94560; font-weight: 700; }
 
@@ -417,13 +418,21 @@ def render_activity_detail(row, u, MAPBOX_TOKEN, draw_map, build_inline_map3d,
     for _zi, (_zn,_zc,_zl,_zlo,_zhi) in enumerate(_hr_zones):
         _blo, _bhi = int(fc_max*_zlo), int(fc_max*_zhi)
         _cur = pd.notna(hr_avg) and fc_max>0 and _zlo <= hr_avg/fc_max < _zhi
-        _hz[_zi].markdown(f"""<div style="background:{_zc}{'20' if _cur else '08'};
-            border:{'3' if _cur else '1'}px solid {_zc}{'ff' if _cur else '44'};
-            border-radius:10px;padding:10px;text-align:center">
-            <div style="font-size:11px;font-weight:700;color:{_zc}">{_zl}</div>
-            <div style="font-size:12px;color:#555">{_blo}–{_bhi} bpm</div>
-            {"<div style='font-size:12px;font-weight:900;color:" + _zc + "'>← attività<br>" + f"{hr_avg/fc_max*100:.0f}% FCmax</div>" if _cur else ""}
-            </div>""", unsafe_allow_html=True)
+        _active_html = ""
+        if _cur:
+            _pct_fc = hr_avg/fc_max*100
+            _active_html = f"<div style=\'font-size:12px;font-weight:900;color:{_zc}\'>← qui<br>{_pct_fc:.0f}% FCmax</div>"
+        _bg_a   = "20" if _cur else "0a"
+        _brd_w  = "3" if _cur else "1"
+        _brd_a  = "ff" if _cur else "33"
+        _hz[_zi].markdown(
+            f"<div style='background:{_zc}{_bg_a};border:{_brd_w}px solid {_zc}{_brd_a};"
+            f"border-radius:10px;padding:10px;text-align:center'>"
+            f"<div style='font-size:11px;font-weight:700;color:{_zc}'>{_zl}</div>"
+            f"<div style='font-size:12px;color:#444'>{_blo}–{_bhi} bpm</div>"
+            f"{_active_html}"
+            f"</div>",
+            unsafe_allow_html=True)
     if pd.notna(hr_avg) and fc_max > 0:
         st.caption(f"FC media: {hr_avg:.0f} bpm ({hr_avg/fc_max*100:.0f}% FCmax) → **{z_l}**" +
                    (f" | FC max attività: {hr_max_a:.0f} bpm ({hr_max_a/fc_max*100:.0f}% FCmax)" if pd.notna(hr_max_a) else ""))
@@ -445,13 +454,18 @@ def render_activity_detail(row, u, MAPBOX_TOKEN, draw_map, build_inline_map3d,
             _wlo = int(ftp*_zlo)
             _whi = f"{int(ftp*_zhi)}" if _zhi < 9 else "+"
             _cur = _zlo <= _wpct < _zhi
-            _pz[_zi].markdown(f"""<div style="background:{_zc}{'20' if _cur else '08'};
-                border:{'3' if _cur else '1'}px solid {_zc}{'ff' if _cur else '44'};
-                border-radius:10px;padding:8px;text-align:center">
-                <div style="font-size:10px;font-weight:700;color:{_zc}">{_zl_p}</div>
-                <div style="font-size:11px;color:#555">{_wlo}–{_whi} W</div>
-                {"<div style='font-size:10px;font-weight:900;color:" + _zc + "'>← attività</div>" if _cur else ""}
-                </div>""", unsafe_allow_html=True)
+            _act_html = f"<div style=\'font-size:10px;font-weight:900;color:{_zc}\'>← qui</div>" if _cur else ""
+            _bg_a  = "20" if _cur else "0a"
+            _brd_w = "3" if _cur else "1"
+            _brd_a = "ff" if _cur else "33"
+            _pz[_zi].markdown(
+                f"<div style='background:{_zc}{_bg_a};border:{_brd_w}px solid {_zc}{_brd_a};"
+                f"border-radius:10px;padding:8px;text-align:center'>"
+                f"<div style='font-size:10px;font-weight:700;color:{_zc}'>{_zl_p}</div>"
+                f"<div style='font-size:11px;color:#444'>{_wlo}–{_whi} W</div>"
+                f"{_act_html}"
+                f"</div>",
+                unsafe_allow_html=True)
         _if_val = watts_avg / ftp
         _tss_p  = (row["moving_time"] * watts_avg * _if_val) / (ftp * 3600) * 100
         _pc1, _pc2, _pc3 = st.columns(3)
@@ -2261,6 +2275,14 @@ if token_ok:
             )
             st.stop()
 
+    # ── Auto-reset dettaglio se cambio menu ──────────────────
+    _last_menu = st.session_state.get("_last_menu_for_detail", menu)
+    if menu != _last_menu and st.session_state.get("selected_activity_id") is not None:
+        st.session_state.selected_activity_id = None
+        st.session_state["_last_menu_for_detail"] = menu
+        st.rerun()
+    st.session_state["_last_menu_for_detail"] = menu
+
     if menu == "📊 Dashboard":
         st.markdown("## 📊 Performance Hub")
 
@@ -2537,10 +2559,10 @@ if token_ok:
                     <div class="activity-card" style="border-color: {s['color']}40;">
                         <div class="activity-header" style="color:{s['color']}">
                             {s['icon']} {row['name']}
-                            <span style="font-size:12px; color:#888; font-weight:400; margin-left:8px">
+                            <span style="font-size:12px; color:#666; font-weight:400; margin-left:8px">
                                 {row['start_date'].strftime('%d %b %Y · %H:%M')}
                             </span>
-                            <span class="zone-badge" style="background:{z_c}22; color:{z_c}; border:1px solid {z_c}44; float:right; font-size:12px">
+                            <span class="zone-badge" style="background:{z_c}18; color:{z_c}; border:1px solid {z_c}55; float:right; font-size:12px; font-weight:700">
                                 {z_l}
                             </span>
                         </div>
@@ -2602,7 +2624,11 @@ if token_ok:
                     _act_id = str(row.get("id", row["start_date"]))
                     _cache_key = f"ai_analysis_{_act_id}"
                     if _cache_key in st.session_state:
-                        st.info(st.session_state[_cache_key])
+                        st.markdown(
+                            f'<div style="background:#f8f9fa;border-left:4px solid {s["color"]};'
+                            f'border-radius:8px;padding:16px 20px;color:#212529;font-size:15px;line-height:1.8">'
+                            f'{st.session_state[_cache_key]}</div>',
+                            unsafe_allow_html=True)
                     else:
                         with st.spinner("Il coach sta analizzando..."):
                             try:
@@ -2623,7 +2649,11 @@ if token_ok:
                                 )
                                 _result = ai_generate(f"{_ctx}\n\n{_prompt}")
                                 st.session_state[_cache_key] = _result
-                                st.info(_result)
+                                st.markdown(
+                                    f'<div style="background:#f8f9fa;border-left:4px solid {s["color"]};'
+                                    f'border-radius:8px;padding:16px 20px;color:#212529;font-size:15px;line-height:1.8">'
+                                    f'{_result}</div>',
+                                    unsafe_allow_html=True)
                             except Exception as e:
                                 st.error(f"Errore AI: {e}")
 
@@ -3264,10 +3294,10 @@ if token_ok:
                 )
                 quick_summary = ai_generate(f"{ctx_quick}\n\n{prompt_quick}")
                 st.markdown(f"""
-                <div style="background:rgba(33,150,243,0.08); border-left:3px solid #2196F3;
-                             border-radius:0 12px 12px 0; padding:14px 18px; margin-bottom:16px;">
-                    <div style="font-size:12px;color:#2196F3;font-weight:700;margin-bottom:6px">🤖 VALUTAZIONE COACH</div>
-                    <div style="color:#ddd;font-size:14px;line-height:1.6">{quick_summary}</div>
+                <div style="background:#f8f9fa;border:1px solid #dee2e6;border-left:4px solid #2196F3;
+                             border-radius:8px; padding:16px 20px; margin-bottom:16px;">
+                    <div style="font-size:12px;color:#2196F3;font-weight:700;margin-bottom:8px;letter-spacing:0.5px">🤖 VALUTAZIONE COACH</div>
+                    <div style="color:#212529;font-size:15px;line-height:1.75">{quick_summary}</div>
                 </div>
                 """, unsafe_allow_html=True)
             except Exception:
@@ -3532,7 +3562,7 @@ if token_ok:
                     except Exception as e:
                         st.error(f"Errore AI: {e}")
             if "analisi_fisica" in st.session_state:
-                st.markdown(f'<div style="background:#f8f9fa;border-left:4px solid #2196F3;border-radius:8px;padding:16px 20px;color:#212529;font-size:14px;line-height:1.7">{st.session_state["analisi_fisica"]}</div>', unsafe_allow_html=True)
+                st.markdown(f'<div style="background:#f8f9fa;border-left:4px solid #2196F3;border-radius:8px;padding:16px 20px;color:#212529;font-size:15px;line-height:1.8">{st.session_state["analisi_fisica"]}</div>', unsafe_allow_html=True)
 
         with col_ai2:
             st.markdown("#### 🗓️ Piano Allenamento — Prossimi 7 giorni")
@@ -3565,7 +3595,7 @@ if token_ok:
                     except Exception as e:
                         st.error(f"Errore AI: {e}")
             if "piano_7gg" in st.session_state:
-                st.markdown(f'<div style="background:#f0fff4;border-left:4px solid #4CAF50;border-radius:8px;padding:16px 20px;color:#1b5e20;font-size:14px;line-height:1.7">{st.session_state["piano_7gg"]}</div>', unsafe_allow_html=True)
+                st.markdown(f'<div style="background:#f0fff4;border-left:4px solid #4CAF50;border-radius:8px;padding:16px 20px;color:#1b5e20;font-size:15px;line-height:1.8">{st.session_state["piano_7gg"]}</div>', unsafe_allow_html=True)
 
     # ============================================================
     # RECAP
@@ -5080,24 +5110,31 @@ map.on('draw.delete', updateStats);
                                 else:
                                     _bg2, _brd2 = "transparent", "1px solid rgba(0,0,0,0.06)"
                                 _circles = ""
-                                for _, _ar in _dacts.head(4).iterrows():
+                                for _, _ar in _dacts.head(3).iterrows():
                                     _asi2 = get_sport_info(_ar["type"], _ar.get("name",""))
                                     _tss2 = float(_ar.get("tss") or 0)
                                     _km2  = _ar["distance"] / 1000
                                     _sec2 = _ar["moving_time"]
                                     _h2, _m2 = int(_sec2//3600), int((_sec2%3600)//60)
                                     _d2  = f"{_h2}h{_m2:02d}" if _h2 > 0 else f"{_m2}m"
-                                    _sz2 = max(14, min(36, int(_tss2 / 5) + 14))
-                                    _circles += (f'<div title="{_asi2["label"]} · {_km2:.1f}km · {_d2} · TSS {_tss2:.0f}" '
-                                                 f'style="width:{_sz2}px;height:{_sz2}px;border-radius:50%;'
-                                                 f'background:{_asi2["color"]};flex-shrink:0"></div>')
-                                if len(_dacts) > 4:
-                                    _circles += f'<div style="font-size:11px;color:#555;align-self:center">+{len(_dacts)-4}</div>'
+                                    _sz2 = max(12, min(28, int(_tss2 / 6) + 12))
+                                    _circles += (
+                                        f'<div title="{_asi2["label"]} · {_km2:.1f}km · {_d2} · TSS {_tss2:.0f}" '
+                                        f'style="display:flex;align-items:center;gap:3px;margin-bottom:2px">'
+                                        f'<div style="width:{_sz2}px;height:{_sz2}px;border-radius:50%;'
+                                        f'background:{_asi2["color"]};flex-shrink:0"></div>'
+                                        f'<div style="font-size:10px;color:#333;line-height:1.1;font-weight:500">'
+                                        f'{_asi2["icon"]} {_km2:.0f}km'
+                                        f'<br><span style="color:#777;font-size:9px">TSS {_tss2:.0f}</span></div>'
+                                        f'</div>'
+                                    )
+                                if len(_dacts) > 3:
+                                    _circles += f'<div style="font-size:10px;color:#777">+{len(_dacts)-3}</div>'
                                 st.markdown(
                                     f'<div style="background:{_bg2};border:{_brd2};border-radius:12px;'
-                                    f'padding:6px 4px 5px;min-height:76px;pointer-events:none;overflow:hidden">'
-                                    f'<div style="font-size:16px;font-weight:700;color:{_num_col};line-height:1;padding:0 4px 5px">{_day.day}</div>'
-                                    f'<div style="display:flex;flex-wrap:wrap;gap:3px;justify-content:center;align-items:flex-end;padding:0 2px">{_circles}</div>'
+                                    f'padding:6px 6px 5px;min-height:88px;pointer-events:none;overflow:hidden">'
+                                    f'<div style="font-size:15px;font-weight:700;color:{_num_col};line-height:1;padding:0 2px 4px">{_day.day}</div>'
+                                    f'<div style="display:flex;flex-direction:column;padding:0 2px">{_circles}</div>'
                                     f'</div>', unsafe_allow_html=True)
                             else:
                                 st.markdown(
