@@ -117,9 +117,11 @@ st.set_page_config(
 )
 
 # ============================================================
-# CSS MOBILE
+# CSS MOBILE — iniettato una sola volta per sessione
 # ============================================================
-st.markdown("""
+if not st.session_state.get("_css_injected"):
+    st.session_state["_css_injected"] = True
+    st.markdown("""
 <style>
   /* Reset e base mobile */
   * { box-sizing: border-box; }
@@ -356,6 +358,7 @@ st.markdown("""
   header { visibility: hidden; }
 </style>
 """, unsafe_allow_html=True)
+# fine CSS injection
 
 # ============================================================
 # SPORT INFO
@@ -463,6 +466,63 @@ def calc_tss(row, u):
         return (row["moving_time"] * watts * IF) / (ftp * 3600) * 100
     return dur * 0.4
 
+def calc_tss_vectorized(df: pd.DataFrame, u: dict) -> pd.Series:
+    """Calcola TSS per tutto il DataFrame in modo vettorizzato — molto più veloce di apply()."""
+    fc_max = u["fc_max"]
+    fc_min = u["fc_min"]
+    ftp    = u.get("ftp", 200)
+    dur    = df["moving_time"] / 60
+    hr     = df["average_heartrate"].fillna(0)
+    watts  = df["average_watts"].fillna(0)
+
+    # TSS da FC
+    has_hr  = (hr > 0) & (fc_max > fc_min)
+    intens  = ((hr - fc_min) / (fc_max - fc_min)).clip(0, 1)
+    tss_hr  = (dur * hr * intens) / (fc_max * 60) * 100
+
+    # TSS da watt
+    has_w   = (watts > 0) & (ftp > 0) & ~has_hr
+    IF_     = watts / ftp
+    tss_w   = (df["moving_time"] * watts * IF_) / (ftp * 3600) * 100
+
+    # Fallback: stima da durata
+    tss_fallback = dur * 0.4
+
+    return pd.Series(
+        np.where(has_hr, tss_hr,
+        np.where(has_w,  tss_w,
+                         tss_fallback)),
+        index=df.index
+    )
+
+def assign_zones_vectorized(df: pd.DataFrame, fc_max: int):
+    """Assegna zone FC in modo vettorizzato — evita 3 apply() separati."""
+    hr_pct = df["average_heartrate"] / fc_max if fc_max > 0 else pd.Series(np.nan, index=df.index)
+
+    conditions = [
+        hr_pct < 0.60,
+        hr_pct < 0.70,
+        hr_pct < 0.80,
+        hr_pct < 0.90,
+        hr_pct >= 0.90,
+    ]
+    zone_nums   = [1, 2, 3, 4, 5]
+    zone_colors = ["#4CAF50", "#8BC34A", "#FFC107", "#FF9800", "#F44336"]
+    zone_labels = ["Z1", "Z2", "Z3", "Z4", "Z5"]
+
+    has_hr = df["average_heartrate"].notna() & (fc_max > 0)
+
+    nums   = np.select(conditions, zone_nums,   default=0)
+    colors = np.select(conditions, zone_colors, default="#9E9E9E")
+    labels = np.select(conditions, zone_labels, default="N/A")
+
+    # Dove non c'è FC → default
+    return (
+        pd.Series(np.where(has_hr, nums,   0),         index=df.index),
+        pd.Series(np.where(has_hr, colors, "#9E9E9E"), index=df.index),
+        pd.Series(np.where(has_hr, labels, "N/A"),     index=df.index),
+    )
+
 def compute_fitness(df):
     daily = df.groupby(df["start_date"].dt.date)["tss"].sum()
     daily.index = pd.to_datetime(daily.index)
@@ -478,37 +538,43 @@ def compute_fitness(df):
     return ctl_mapped, atl_mapped, tsb_mapped, ctl, atl, tsb, daily
 
 def calc_vo2max_estimate(df_sorted):
+    """VO2max stimato — vettorizzato con numpy, non più iterrows()."""
     runs = df_sorted[
         (df_sorted["type"].isin(["Run","TrailRun"])) &
         (df_sorted["distance"] >= 5000)
-    ].copy()
+    ]
     if runs.empty:
         return None
-    best_vo2 = 0
-    for _, row in runs.iterrows():
-        dist_m   = row["distance"]
-        time_min = row["moving_time"] / 60
-        if time_min <= 0: continue
-        vel = dist_m / time_min
-        pct = 0.8 + 0.1894393 * np.exp(-0.012778 * time_min) + \
-              0.2989558 * np.exp(-0.1932605 * time_min)
-        vo2 = (-4.60 + 0.182258 * vel + 0.000104 * vel**2)
-        vo2max = vo2 / pct if pct > 0 else 0
-        if vo2max > best_vo2:
-            best_vo2 = vo2max
-    return round(best_vo2, 1) if best_vo2 > 0 else None
+    time_min = runs["moving_time"] / 60
+    dist_m   = runs["distance"]
+    valid    = time_min > 0
+    if not valid.any():
+        return None
+    time_min = time_min[valid]
+    dist_m   = dist_m[valid]
+    vel  = dist_m / time_min
+    pct  = (0.8 + 0.1894393 * np.exp(-0.012778 * time_min)
+               + 0.2989558 * np.exp(-0.1932605 * time_min))
+    vo2  = -4.60 + 0.182258 * vel + 0.000104 * vel**2
+    vo2max_arr = np.where(pct > 0, vo2 / pct, 0)
+    best = float(np.max(vo2max_arr))
+    return round(best, 1) if best > 0 else None
 
 # ============================================================
 # GOOGLE SHEETS — Cache persistente
 # ============================================================
 def _get_gsheet_client():
-    """Restituisce (client, sheet) se configurato, altrimenti (None, None) con errore loggato."""
-    if not GSHEET_ID:
-        st.session_state["_gsheet_err"] = "❌ GSHEET_ID mancante nei Secrets"
+    """Restituisce (client, sheet) se configurato — con cache in session_state per evitare
+    riconnessioni OAuth ad ogni chiamata (era il collo di bottiglia principale GSheet)."""
+    if not GSHEET_ID or not GSHEET_CREDS:
+        st.session_state["_gsheet_err"] = "❌ GSHEET_ID o GSHEET_CREDENTIALS mancanti nei Secrets"
         return None, None
-    if not GSHEET_CREDS:
-        st.session_state["_gsheet_err"] = "❌ GSHEET_CREDENTIALS mancante nei Secrets"
-        return None, None
+
+    # ── Cache del client nella sessione ──
+    _cached = st.session_state.get("_gsheet_client_cache")
+    if _cached is not None:
+        return _cached  # già connesso, ritorna subito
+
     try:
         import gspread
         from google.oauth2.service_account import Credentials
@@ -531,17 +597,18 @@ def _get_gsheet_client():
         except gspread.exceptions.SpreadsheetNotFound:
             st.session_state["_gsheet_err"] = (
                 f"❌ Sheet non trovato (ID: {GSHEET_ID[:12]}...). "
-                f"Controlla GSHEET_ID e che il Sheet sia condiviso con: {creds_dict.get('client_email','?')}"
+                f"Controlla GSHEET_ID e condividi con: {creds_dict.get('client_email','?')}"
             )
             return None, None
         except Exception as e:
             st.session_state["_gsheet_err"] = f"❌ Errore apertura sheet: {e}"
             return None, None
-        st.session_state["_gsheet_err"] = None  # nessun errore
-        st.session_state["_gsheet_email"] = creds_dict.get("client_email","?")
+        st.session_state["_gsheet_err"]          = None
+        st.session_state["_gsheet_email"]        = creds_dict.get("client_email","?")
+        st.session_state["_gsheet_client_cache"] = (client, sheet)  # salva in cache
         return client, sheet
     except ImportError:
-        st.session_state["_gsheet_err"] = "❌ Libreria 'gspread' non installata. Aggiungila al requirements.txt"
+        st.session_state["_gsheet_err"] = "❌ Libreria 'gspread' non installata."
         return None, None
     except Exception as e:
         st.session_state["_gsheet_err"] = f"❌ Errore generico GSheet: {e}"
@@ -1553,48 +1620,77 @@ if not raw:
     st.error("Impossibile recuperare le attività da Strava.")
     st.stop()
 
-# ── Build DataFrame ──
-df = pd.DataFrame(raw)
-df["start_date"] = pd.to_datetime(df.get("start_date_local", df.get("start_date",""))).dt.tz_localize(None)
-df = df.sort_values("start_date").reset_index(drop=True)
-
-for col in ["average_heartrate","max_heartrate","average_watts",
-            "total_elevation_gain","average_cadence","kilojoules",
-            "calories","suffer_score","distance","moving_time"]:
-    if col not in df.columns:
-        df[col] = np.nan
-    else:
-        df[col] = pd.to_numeric(df[col], errors="coerce")
-
 u = st.session_state.user_data
 
-# Carica conversazioni salvate (una volta per sessione)
+# ── Cache del DataFrame elaborato in session_state ──
+# La chiave include il numero di attività + hash del profilo utente
+# → si ricalcola solo se cambiano i dati o il profilo (FTP, FC max, ecc.)
+_df_cache_key = f"df_built_{len(raw)}_{u.get('fc_max',190)}_{u.get('fc_min',50)}_{u.get('ftp',200)}"
+
+if st.session_state.get("_df_cache_key") != _df_cache_key:
+    # ── Build DataFrame ──
+    df = pd.DataFrame(raw)
+    df["start_date"] = pd.to_datetime(
+        df.get("start_date_local", df.get("start_date",""))
+    ).dt.tz_localize(None)
+    df = df.sort_values("start_date").reset_index(drop=True)
+
+    for col in ["average_heartrate","max_heartrate","average_watts",
+                "total_elevation_gain","average_cadence","kilojoules",
+                "calories","suffer_score","distance","moving_time"]:
+        if col not in df.columns:
+            df[col] = np.nan
+        else:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    # TSS vettorizzato (era apply() riga per riga)
+    df["tss"] = calc_tss_vectorized(df, u)
+
+    # Fitness (CTL/ATL/TSB)
+    ctl_s, atl_s, tsb_s, ctl_daily, atl_daily, tsb_daily, tss_daily = compute_fitness(df)
+    df["ctl"] = ctl_s.values
+    df["atl"] = atl_s.values
+    df["tsb"] = tsb_s.values
+
+    # Zone FC vettorizzate (erano 3 apply() separati)
+    df["zone_num"], df["zone_color"], df["zone_label"] = assign_zones_vectorized(df, u["fc_max"])
+
+    # VO2max (ora vettorizzato)
+    vo2max_val = calc_vo2max_estimate(df)
+
+    # Salva tutto in cache
+    st.session_state["_df_cache_key"]   = _df_cache_key
+    st.session_state["_df_cached"]      = df
+    st.session_state["_ctl_daily"]      = ctl_daily
+    st.session_state["_atl_daily"]      = atl_daily
+    st.session_state["_tsb_daily"]      = tsb_daily
+    st.session_state["_tss_daily"]      = tss_daily
+    st.session_state["_vo2max_val"]     = vo2max_val
+else:
+    # Recupera dalla cache — zero ricalcoli
+    df         = st.session_state["_df_cached"]
+    ctl_daily  = st.session_state["_ctl_daily"]
+    atl_daily  = st.session_state["_atl_daily"]
+    tsb_daily  = st.session_state["_tsb_daily"]
+    tss_daily  = st.session_state["_tss_daily"]
+    vo2max_val = st.session_state["_vo2max_val"]
+
+# Carica conversazioni e piano (una sola volta per sessione, indipendente dal df)
 if _gsheet_ok and not st.session_state.get("conv_loaded") and not st.session_state.messages:
     _saved_conv = gsheet_load_conversations()
     if _saved_conv:
         st.session_state.messages = _saved_conv
     st.session_state.conv_loaded = True
 
-# Carica piano settimanale salvato
 if _gsheet_ok and st.session_state.get("weekly_plan") is None:
     _saved_plan, _saved_plan_dt = gsheet_load_weekly_plan()
     if _saved_plan:
         st.session_state.weekly_plan      = _saved_plan
         st.session_state.weekly_plan_date = _saved_plan_dt
 
-df["tss"] = df.apply(lambda row: calc_tss(row, u), axis=1)
-ctl_s, atl_s, tsb_s, ctl_daily, atl_daily, tsb_daily, tss_daily = compute_fitness(df)
-df["ctl"]        = ctl_s.values
-df["atl"]        = atl_s.values
-df["tsb"]        = tsb_s.values
-df["zone_num"]   = df.apply(lambda r: get_zone_for_activity(r, u["fc_max"])[0], axis=1)
-df["zone_color"] = df.apply(lambda r: get_zone_for_activity(r, u["fc_max"])[1], axis=1)
-df["zone_label"] = df.apply(lambda r: get_zone_for_activity(r, u["fc_max"])[2], axis=1)
-
 current_ctl = float(df["ctl"].iloc[-1])
 current_atl = float(df["atl"].iloc[-1])
 current_tsb = float(df["tsb"].iloc[-1])
-vo2max_val  = calc_vo2max_estimate(df)
 
 if current_tsb > 10:   status_color, status_label = "#4CAF50", "🟢 In Forma"
 elif current_tsb > -5: status_color, status_label = "#FF9800", "🟡 Stabile"
@@ -1999,41 +2095,93 @@ if st.session_state.selected_act_id is not None:
 # ============================================================
 if st.session_state.mob_menu == "dashboard":
 
-    # ── Sparkline CTL/ATL/TSB — numeri grandi + mini trend 14gg ──
-    _spark_days = 14
-    _spark_data = pd.DataFrame({
-        "ctl": ctl_daily, "atl": atl_daily, "tsb": tsb_daily,
-    }).dropna().tail(_spark_days)
+    # ── Cache dei calcoli della dashboard — si ricalcola solo se il df cambia ──
+    _dash_key = f"dash_computed_{_df_cache_key}"
+    if st.session_state.get("_dash_computed_key") != _dash_key:
+        _spark_days = 14
+        _spark_data = pd.DataFrame({
+            "ctl": ctl_daily, "atl": atl_daily, "tsb": tsb_daily,
+        }).dropna().tail(_spark_days)
 
-    _ctl_vals = list(_spark_data["ctl"]) if not _spark_data.empty else [current_ctl]
-    _atl_vals = list(_spark_data["atl"]) if not _spark_data.empty else [current_atl]
-    _tsb_vals = list(_spark_data["tsb"]) if not _spark_data.empty else [current_tsb]
+        _ctl_vals = list(_spark_data["ctl"]) if not _spark_data.empty else [current_ctl]
+        _atl_vals = list(_spark_data["atl"]) if not _spark_data.empty else [current_atl]
+        _tsb_vals = list(_spark_data["tsb"]) if not _spark_data.empty else [current_tsb]
 
-    # Delta vs 7gg fa
-    _7d_ago = df[df["start_date"] <= df["start_date"].max() - pd.Timedelta(days=7)]
-    def _delta_html(cur, series_7d):
-        if series_7d.empty: return ""
-        old = float(series_7d.iloc[-1])
-        d = cur - old
-        arrow = "&#8593;" if d > 0.5 else "&#8595;" if d < -0.5 else "&#8594;"
-        col = "#4CAF50" if d > 0.5 else "#F44336" if d < -0.5 else "#aaa"
-        return f'<span style="color:{col};font-size:11px">{arrow}{abs(d):.0f}</span>'
+        _7d_ago = df[df["start_date"] <= df["start_date"].max() - pd.Timedelta(days=7)]
+        def _delta_html(cur, series_7d):
+            if series_7d.empty: return ""
+            old = float(series_7d.iloc[-1])
+            d = cur - old
+            arrow = "&#8593;" if d > 0.5 else "&#8595;" if d < -0.5 else "&#8594;"
+            col = "#4CAF50" if d > 0.5 else "#F44336" if d < -0.5 else "#aaa"
+            return f'<span style="color:{col};font-size:11px">{arrow}{abs(d):.0f}</span>'
 
-    _dh_ctl = _delta_html(current_ctl, _7d_ago["ctl"] if not _7d_ago.empty else pd.Series())
-    _dh_atl = _delta_html(current_atl, _7d_ago["atl"] if not _7d_ago.empty else pd.Series())
-    _dh_tsb = _delta_html(current_tsb, _7d_ago["tsb"] if not _7d_ago.empty else pd.Series())
+        _dh_ctl = _delta_html(current_ctl, _7d_ago["ctl"] if not _7d_ago.empty else pd.Series())
+        _dh_atl = _delta_html(current_atl, _7d_ago["atl"] if not _7d_ago.empty else pd.Series())
+        _dh_tsb = _delta_html(current_tsb, _7d_ago["tsb"] if not _7d_ago.empty else pd.Series())
 
-    ctl_color = "#4CAF50" if current_ctl > 60 else "#FF9800" if current_ctl > 40 else "#F44336"
-    tsb_color = "#4CAF50" if current_tsb > 5 else "#FF9800" if current_tsb > -15 else "#F44336"
-    atl_color = "#FF9800" if current_atl > current_ctl * 1.1 else "#4CAF50"
+        ctl_color = "#4CAF50" if current_ctl > 60 else "#FF9800" if current_ctl > 40 else "#F44336"
+        tsb_color = "#4CAF50" if current_tsb > 5 else "#FF9800" if current_tsb > -15 else "#F44336"
+        atl_color = "#FF9800" if current_atl > current_ctl * 1.1 else "#4CAF50"
 
-    _svg_ctl = make_sparkline_svg(_ctl_vals, ctl_color, width=88, height=30)
-    _svg_atl = make_sparkline_svg(_atl_vals, atl_color, width=88, height=30)
-    _svg_tsb = make_sparkline_svg(_tsb_vals, tsb_color, width=88, height=30, show_zero_line=True)
+        _svg_ctl = make_sparkline_svg(_ctl_vals, ctl_color, width=88, height=30)
+        _svg_atl = make_sparkline_svg(_atl_vals, atl_color, width=88, height=30)
+        _svg_tsb = make_sparkline_svg(_tsb_vals, tsb_color, width=88, height=30, show_zero_line=True)
 
-    _last7 = df[df["start_date"] >= df["start_date"].max() - pd.Timedelta(days=7)]
-    _tss7  = str(round(_last7["tss"].sum()))
-    _n7    = str(len(_last7))
+        _last7 = df[df["start_date"] >= df["start_date"].max() - pd.Timedelta(days=7)]
+        _tss7  = str(round(_last7["tss"].sum()))
+        _n7    = str(len(_last7))
+
+        # Recap 7gg — calorie vettorizzate
+        _w7 = _last7
+        _w7_hrs  = _w7["moving_time"].sum() / 3600
+        _w7_km   = _w7["distance"].sum() / 1000
+        _w7_elev = _w7["total_elevation_gain"].sum()
+        _w7_tss  = _w7["tss"].sum()
+        _w7_n    = len(_w7)
+        _cal_col  = _w7["calories"].fillna(0)
+        _kj_col   = _w7["kilojoules"].fillna(0) * 0.239
+        _fc_est   = (_w7["moving_time"] / 60 * (
+            0.014 * _w7["average_heartrate"].fillna(0) - 0.05
+        ) * float(u.get("peso",75)) / 60 * 4.184).fillna(0)
+        _w7_kcal = float(
+            np.where(_cal_col > 0, _cal_col,
+            np.where(_kj_col  > 0, _kj_col, _fc_est))
+        .sum())
+        _w7_sports    = _w7["type"].value_counts()
+        _sport_icons  = " ".join([SPORT_INFO.get(t, {"icon":"🏅"})["icon"] for t in _w7_sports.index[:3]])
+
+        st.session_state.update({
+            "_dash_computed_key": _dash_key,
+            "_dash_ctl_vals": _ctl_vals, "_dash_atl_vals": _atl_vals, "_dash_tsb_vals": _tsb_vals,
+            "_dash_dh_ctl": _dh_ctl, "_dash_dh_atl": _dh_atl, "_dash_dh_tsb": _dh_tsb,
+            "_dash_ctl_color": ctl_color, "_dash_tsb_color": tsb_color, "_dash_atl_color": atl_color,
+            "_dash_svg_ctl": _svg_ctl, "_dash_svg_atl": _svg_atl, "_dash_svg_tsb": _svg_tsb,
+            "_dash_tss7": _tss7, "_dash_n7": _n7,
+            "_dash_w7_hrs": _w7_hrs, "_dash_w7_km": _w7_km, "_dash_w7_elev": _w7_elev,
+            "_dash_w7_tss": _w7_tss, "_dash_w7_n": _w7_n, "_dash_w7_kcal": _w7_kcal,
+            "_dash_sport_icons": _sport_icons,
+        })
+
+    # Leggi valori dalla cache
+    ctl_color    = st.session_state["_dash_ctl_color"]
+    tsb_color    = st.session_state["_dash_tsb_color"]
+    atl_color    = st.session_state["_dash_atl_color"]
+    _svg_ctl     = st.session_state["_dash_svg_ctl"]
+    _svg_atl     = st.session_state["_dash_svg_atl"]
+    _svg_tsb     = st.session_state["_dash_svg_tsb"]
+    _dh_ctl      = st.session_state["_dash_dh_ctl"]
+    _dh_atl      = st.session_state["_dash_dh_atl"]
+    _dh_tsb      = st.session_state["_dash_dh_tsb"]
+    _tss7        = st.session_state["_dash_tss7"]
+    _n7          = st.session_state["_dash_n7"]
+    _w7_hrs      = st.session_state["_dash_w7_hrs"]
+    _w7_km       = st.session_state["_dash_w7_km"]
+    _w7_elev     = st.session_state["_dash_w7_elev"]
+    _w7_tss      = st.session_state["_dash_w7_tss"]
+    _w7_n        = st.session_state["_dash_w7_n"]
+    _w7_kcal     = st.session_state["_dash_w7_kcal"]
+    _sport_icons = st.session_state["_dash_sport_icons"]
 
     def _spark_card(val_str, label, sub, color, delta_html, svg):
         return (
@@ -2062,30 +2210,6 @@ if st.session_state.mob_menu == "dashboard":
         f'</div></div>',
         unsafe_allow_html=True
     )
-
-    # ── Recap settimana corrente ──
-    _w7 = df[df["start_date"] >= df["start_date"].max() - pd.Timedelta(days=7)]
-    _w7_hrs   = _w7["moving_time"].sum() / 3600
-    _w7_km    = _w7["distance"].sum() / 1000
-    _w7_elev  = _w7["total_elevation_gain"].sum()
-    _w7_tss   = _w7["tss"].sum()
-    _w7_n     = len(_w7)
-    # Calorie: usa kilojoules Strava se disponibile, altrimenti stima da FC
-    _w7_kcal  = 0
-    for _, _wr in _w7.iterrows():
-        _kj = _wr.get("kilojoules")
-        _cal_raw = _wr.get("calories")
-        if pd.notna(_cal_raw) and float(_cal_raw) > 0:
-            _w7_kcal += float(_cal_raw)
-        elif pd.notna(_kj) and float(_kj) > 0:
-            _w7_kcal += float(_kj) * 0.239
-        elif pd.notna(_wr.get("average_heartrate")):
-            _t_min = _wr["moving_time"] / 60
-            _w7_kcal += _t_min * (0.014 * float(_wr["average_heartrate"]) - 0.05) * float(u.get("peso",75)) / 60 * 4.184
-
-    # Sport mix della settimana
-    _w7_sports = _w7["type"].value_counts()
-    _sport_icons = " ".join([SPORT_INFO.get(t, {"icon":"🏅"})["icon"] for t in _w7_sports.index[:3]])
 
     _w7_metrics = [
         ("⏱", f"{_w7_hrs:.1f}h", "ore attività"),
